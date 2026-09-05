@@ -78,6 +78,11 @@ One test, for the one thing that shipped broken: that ⌘V works. See the
   alternative, `NSEvent.addGlobalMonitorForEvents`, needs Accessibility
   permission — the right to watch every keystroke you type — which is an
   enormous thing to ask for a text box. Carbon asks for nothing.
+- **The confirmation is the whole box, and the icon too.** After a create,
+  the field is replaced by a green tick and the title that was filed, and the
+  menu bar icon turns into a tick for two seconds. Quick capture is by
+  definition something you do while looking at something else, so the
+  confirmation has to outlive the popover that showed it.
 - **The popover doesn't clear on failure.** What you typed is the only copy of
   it, and a box that empties itself when the network is down loses the thought
   it exists to catch.

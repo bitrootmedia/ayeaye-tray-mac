@@ -15,13 +15,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            // A template image takes the menu bar's own colour, so it follows
-            // light and dark without two assets. `checkmark.circle` is in the
-            // system symbols on macOS 11+, and the text fallback is there
-            // because a missing symbol would otherwise be an invisible,
-            // unclickable status item — a bug with no visible symptom.
-            if let image = NSImage(systemSymbolName: "checkmark.circle", accessibilityDescription: "ayeaye") {
-                image.isTemplate = true
+            if let image = Self.idleImage() {
                 button.image = image
             } else {
                 button.title = "⌁"
@@ -116,14 +110,58 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         do {
             let client = try MCPClient.fromSettings()
             _ = try await client.createTask(title: title, organisationID: org)
-            quickAdd.report("Created", isError: false)
-            // Long enough to read the confirmation, short enough that it
-            // isn't in the way of the next thought.
-            try? await Task.sleep(nanoseconds: 700_000_000)
+            quickAdd.confirm(title: title)
+            flashCreated()
+            // Long enough to read the title back and be sure it was the one
+            // you meant, short enough not to be in the way of the next
+            // thought. The menu bar tick outlasts it deliberately, so the
+            // confirmation survives the popover closing.
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
             popover.performClose(nil)
         } catch {
             quickAdd.report(error.localizedDescription, isError: true)
         }
+    }
+
+    /// Turn the menu bar icon into a green tick for a moment.
+    ///
+    /// The popover is gone a second and a half after a task is filed, and
+    /// quick capture is by definition something you do while looking at
+    /// something else — so the confirmation has to outlive the thing that
+    /// showed it. The icon is the one part of this app that is always on
+    /// screen, which makes it the right place for "that worked".
+    ///
+    /// `flashToken` is what stops two creates in quick succession from
+    /// fighting: the second flash takes ownership, and the first one's
+    /// timer finds a token that is no longer its own and leaves the icon
+    /// alone rather than restoring it out from under the second.
+    private var flashToken = 0
+
+    private func flashCreated() {
+        guard let button = statusItem.button else { return }
+        flashToken += 1
+        let mine = flashToken
+        button.image = NSImage(
+            systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Task created")
+        button.contentTintColor = .systemGreen
+        DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
+            guard let self = self, self.flashToken == mine else { return }
+            button.contentTintColor = nil
+            button.image = Self.idleImage()
+        }
+    }
+
+    /// The ordinary menu bar icon. A template image so it takes the menu
+    /// bar's own colour and follows light and dark with no second asset;
+    /// the text fallback is there because a missing symbol would otherwise
+    /// leave an invisible, unclickable status item.
+    static func idleImage() -> NSImage? {
+        guard let image = NSImage(
+            systemSymbolName: "checkmark.circle", accessibilityDescription: "ayeaye") else {
+            return nil
+        }
+        image.isTemplate = true
+        return image
     }
 
     // MARK: - The global hotkey
