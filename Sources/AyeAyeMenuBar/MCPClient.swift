@@ -124,11 +124,65 @@ struct MCPClient {
 
     // MARK: - The two calls this app actually makes
 
-    func createTask(title: String, organisationID: String) async throws -> String {
-        try await call(tool: "create_task", arguments: [
+    /// Returns the new task's id, so it can be opened afterwards.
+    ///
+    /// `create_task` answers `Created [<uuid>] <title>` — prose, because its
+    /// real audience is a language model. Same parse-the-sentence bargain as
+    /// `organisations` below: mildly ugly here, and much better than a
+    /// second endpoint on the server existing only for this app.
+    @discardableResult
+    func createTask(title: String, organisationID: String) async throws -> String? {
+        let answer = try await call(tool: "create_task", arguments: [
             "organisation_id": organisationID,
             "title": title,
         ])
+        return Self.firstBracketedID(in: answer)
+    }
+
+    static func firstBracketedID<S: StringProtocol>(in line: S) -> String? {
+        guard let open = line.firstIndex(of: "["),
+              let close = line[open...].firstIndex(of: "]")
+        else { return nil }
+        let id = String(line[line.index(after: open)..<close])
+        return id.isEmpty ? nil : id
+    }
+
+    struct TaskSummary {
+        let id: String
+        let title: String
+    }
+
+    /// The critical tasks that are yours and still open.
+    ///
+    /// `mine_only` is the server's own filter, which resolves to "tasks you
+    /// own" — so this is the same set the web dashboard's Critical card
+    /// shows, not everything critical in the organisation. That distinction
+    /// matters for something that turns the menu bar red: an admin can see
+    /// every task in the company, and colouring the icon for all of them
+    /// would make it permanently red and permanently ignored.
+    func criticalTasks(organisationID: String) async throws -> [TaskSummary] {
+        let text = try await call(tool: "list_tasks", arguments: [
+            "organisation_id": organisationID,
+            "priority": "critical",
+            "mine_only": true,
+            "limit": 20,
+        ])
+        return text.split(separator: "\n").compactMap { line in
+            // The first line is a count header ("3 of 3 task(s):"), and rows
+            // are `[id] | title | status=… | priority=…`.
+            guard line.hasPrefix("["), let id = Self.firstBracketedID(in: line) else { return nil }
+            let fields = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count > 1 else { return nil }
+            return TaskSummary(id: id, title: fields[1])
+        }
+    }
+
+    /// Where a task lives in the web app. The SPA's own route, which is the
+    /// contract this relies on — `orgs/:orgId/tasks/:taskId`.
+    static func webURL(base: String, organisationID: String, taskID: String) -> URL? {
+        var trimmed = base.trimmingCharacters(in: .whitespaces)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return URL(string: "\(trimmed)/orgs/\(organisationID)/tasks/\(taskID)")
     }
 
     struct Organisation {

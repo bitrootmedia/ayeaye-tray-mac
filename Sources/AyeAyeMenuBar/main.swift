@@ -83,7 +83,8 @@ if arguments.first == "--create" {
         do {
             let client = try MCPClient.fromSettings()
             guard let org = Settings.organisationID else { throw MCPError.notConfigured }
-            print(try await client.createTask(title: title, organisationID: org))
+            let id = try await client.createTask(title: title, organisationID: org)
+            print(id.map { "Created \($0): \(title)" } ?? "Created: \(title)")
         } catch {
             FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
             outcome.status = 1

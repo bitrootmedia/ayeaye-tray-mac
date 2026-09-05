@@ -7,6 +7,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private let quickAdd = QuickAddView(frame: NSRect(x: 0, y: 0, width: 320, height: 84))
     private var settingsWindow: SettingsWindow?
     private var hotKeyRef: EventHotKeyRef?
+    /// What the last poll found. Held so the popover can render instantly
+    /// when it opens — asking the server first would mean a text box that
+    /// arrives after the keystroke that asked for it.
+    private var critical: [MCPClient.TaskSummary] = []
+    private var criticalTimer: Timer?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Before any window or field exists: without it, ⌘V is dead app-wide.
@@ -15,11 +20,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
-            if let image = Self.idleImage() {
-                button.image = image
-            } else {
-                button.title = "⌁"
-            }
+            button.image = AnchorIcon.image()
+            button.imagePosition = .imageLeading
             button.action = #selector(statusItemClicked)
             button.target = self
             button.sendAction(on: [.leftMouseUp, .rightMouseUp])
@@ -34,8 +36,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickAdd.onEscape = { [weak self] in self?.popover.performClose(nil) }
         quickAdd.onOpenSettings = { [weak self] in self?.openSettings() }
         quickAdd.onSubmit = { [weak self] title in await self?.create(title: title) }
+        quickAdd.onPickOrganisation = { [weak self] anchor in self?.pickOrganisation(from: anchor) }
+        quickAdd.onOpenTask = { [weak self] id in self?.openInWeb(taskID: id) }
 
         registerHotKey()
+        startWatchingCritical()
 
         // Nothing configured yet means nothing this app can do, so it opens
         // the one screen that fixes that rather than leaving a new user
@@ -45,6 +50,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     func applicationWillTerminate(_ notification: Notification) {
         if let ref = hotKeyRef { UnregisterEventHotKey(ref) }
+        criticalTimer?.invalidate()
     }
 
     // MARK: - The menu bar item
@@ -86,11 +92,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             popover.performClose(nil)
             return
         }
+        quickAdd.refresh()
+        quickAdd.showCritical(critical)
+        // Sized to whatever the content now needs — the critical list makes
+        // this view a different height on different days, and a popover with
+        // a fixed contentSize would clip it.
+        popover.contentSize = quickAdd.fittingSize
         popover.show(relativeTo: button.bounds, of: button, preferredEdge: .minY)
         // An accessory app doesn't come forward on its own, and a popover
         // that can't take focus is a text field you can't type into.
         NSApp.activate(ignoringOtherApps: true)
         quickAdd.refresh()
+        // Opening the box is the one moment somebody is definitely looking,
+        // so it is worth a fresh look at what's critical even though the
+        // timer will come round anyway.
+        Task { await refreshCritical() }
     }
 
     @objc func openSettings() {
@@ -109,8 +125,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             let client = try MCPClient.fromSettings()
-            _ = try await client.createTask(title: title, organisationID: org)
-            quickAdd.confirm(title: title)
+            let id = try await client.createTask(title: title, organisationID: org)
+            quickAdd.confirm(title: title, taskID: id)
             flashCreated()
             // Long enough to read the title back and be sure it was the one
             // you meant, short enough not to be in the way of the next
@@ -136,32 +152,157 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// timer finds a token that is no longer its own and leaves the icon
     /// alone rather than restoring it out from under the second.
     private var flashToken = 0
+    private var flashing = false
 
     private func flashCreated() {
         guard let button = statusItem.button else { return }
         flashToken += 1
+        flashing = true
         let mine = flashToken
         button.image = NSImage(
             systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Task created")
         button.contentTintColor = .systemGreen
+        button.title = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
             guard let self = self, self.flashToken == mine else { return }
-            button.contentTintColor = nil
-            button.image = Self.idleImage()
+            // Back to whichever state is current, not to the plain anchor:
+            // between the tick appearing and this running, a poll may have
+            // found something critical, and restoring the calm icon over it
+            // would hide exactly the thing the red is for.
+            self.flashing = false
+            self.updateIcon()
         }
     }
 
-    /// The ordinary menu bar icon. A template image so it takes the menu
-    /// bar's own colour and follows light and dark with no second asset;
-    /// the text fallback is there because a missing symbol would otherwise
-    /// leave an invisible, unclickable status item.
-    static func idleImage() -> NSImage? {
-        guard let image = NSImage(
-            systemSymbolName: "checkmark.circle", accessibilityDescription: "ayeaye") else {
-            return nil
+    /// The menu bar icon, in whichever of its three states applies.
+    ///
+    /// Ordinary: the web app's anchor, as a template image, so it takes the
+    /// menu bar's own colour in light mode, dark mode and while its menu is
+    /// open. Critical: the same anchor in red, with the count beside it —
+    /// the same shape deliberately, because the icon is how this app is
+    /// found in a crowded menu bar and swapping it for a bell means hunting
+    /// for something that isn't there. Colour says "look", the number says
+    /// "how much". Just created: a green tick, briefly, which outranks both
+    /// because it is answering something you did a second ago.
+    private func updateIcon() {
+        guard let button = statusItem.button, flashToken == 0 || !flashing else { return }
+        if critical.isEmpty {
+            button.image = AnchorIcon.image()
+            button.contentTintColor = nil
+            button.title = ""
+        } else {
+            button.image = AnchorIcon.alert()
+            button.contentTintColor = nil
+            button.title = " \(critical.count)"
+            button.attributedTitle = NSAttributedString(
+                string: " \(critical.count)",
+                attributes: [
+                    .foregroundColor: NSColor.systemRed,
+                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
+                ])
         }
-        image.isTemplate = true
-        return image
+    }
+
+    // MARK: - Switching organisation
+
+    /// The organisation name in the popover is a button, and this is what it
+    /// opens: the list, fetched fresh, with the current one ticked.
+    ///
+    /// Fetched on each click rather than cached, because the cost is one
+    /// request at the moment somebody has asked a question — and a stale
+    /// list here means an organisation you joined this morning is missing
+    /// from the only place you could pick it.
+    private func pickOrganisation(from anchor: NSView) {
+        Task { @MainActor in
+            let menu = NSMenu()
+            do {
+                let orgs = try await MCPClient.fromSettings().organisations()
+                for org in orgs {
+                    let item = menu.addItem(
+                        withTitle: org.name, action: #selector(chooseOrganisation(_:)),
+                        keyEquivalent: "")
+                    item.target = self
+                    item.representedObject = org.id
+                    item.state = org.id == Settings.organisationID ? .on : .off
+                }
+                if orgs.isEmpty {
+                    menu.addItem(withTitle: "No organisations", action: nil, keyEquivalent: "")
+                }
+            } catch {
+                menu.addItem(withTitle: error.localizedDescription, action: nil, keyEquivalent: "")
+            }
+            menu.addItem(.separator())
+            let settings = menu.addItem(
+                withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: "")
+            settings.target = self
+            // Anchored under the button rather than at the mouse, so it
+            // reads as that control's menu — and inside the popover, which
+            // stays open because a menu does not steal its key window.
+            menu.popUp(positioning: nil, at: NSPoint(x: 0, y: anchor.bounds.height + 4), in: anchor)
+        }
+    }
+
+    @objc private func chooseOrganisation(_ sender: NSMenuItem) {
+        guard let id = sender.representedObject as? String else { return }
+        Settings.organisationID = id
+        Settings.organisationName = sender.title
+        quickAdd.refresh()
+        // The old organisation's critical tasks are not this one's. Cleared
+        // rather than left on screen while the new answer is in flight —
+        // showing one organisation's work under another's name is worse
+        // than showing nothing for a moment.
+        critical = []
+        quickAdd.showCritical(nil)
+        updateIcon()
+        Task { await refreshCritical() }
+    }
+
+    // MARK: - Opening things in the browser
+
+    private func openInWeb(taskID: String) {
+        guard let base = Settings.baseURL, let org = Settings.organisationID,
+              let url = MCPClient.webURL(base: base, organisationID: org, taskID: taskID)
+        else { return }
+        NSWorkspace.shared.open(url)
+        popover.performClose(nil)
+    }
+
+    // MARK: - Critical tasks
+
+    /// Every five minutes, and whenever the popover opens.
+    ///
+    /// Polling, because there is nothing to subscribe to: the server has a
+    /// realtime channel, but it authenticates with a session cookie this app
+    /// deliberately does not have (see MCPClient). Five minutes is chosen to
+    /// be useless as a notification and useful as a status light — something
+    /// marked critical while you were in a meeting will be red by the time
+    /// you look up, which is all this needs to do.
+    private func startWatchingCritical() {
+        criticalTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.refreshCritical() }
+        }
+        Task { await refreshCritical() }
+    }
+
+    @MainActor
+    private func refreshCritical() async {
+        guard Settings.isConfigured, let org = Settings.organisationID else {
+            critical = []
+            updateIcon()
+            return
+        }
+        do {
+            critical = try await MCPClient.fromSettings().criticalTasks(organisationID: org)
+        } catch {
+            // Left as it was, deliberately. A dropped wifi connection must
+            // not clear a red icon — "we could not check" and "nothing is
+            // critical" are different answers, and only one of them is
+            // safe to show as calm.
+            return
+        }
+        updateIcon()
+        if popover.isShown { quickAdd.showCritical(critical) }
     }
 
     // MARK: - The global hotkey

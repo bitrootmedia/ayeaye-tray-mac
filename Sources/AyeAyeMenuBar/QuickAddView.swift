@@ -1,28 +1,37 @@
 import AppKit
 
 /// The whole app, visually: one text field, the organisation it will file
-/// into, and a hint.
+/// into, and — when there are any — the critical tasks waiting for you.
 ///
 /// No Create button. Return submits and Escape dismisses, which is what
 /// anybody typing into a box that appeared under a keystroke will try
-/// first — and a button you never press is a button taking up space in a
-/// popover that exists to be small. The organisation is a label rather than
-/// a picker for the same reason: it is there so you can see where the task
-/// is going, and changing it is a once-a-month act that belongs in Settings.
+/// first, and a button you never press is a button taking up space in a
+/// popover that exists to be small.
 final class QuickAddView: NSView, NSTextFieldDelegate {
     private let field = NSTextField()
-    private let orgLabel = NSTextField(labelWithString: "")
+    private let orgButton = NSButton()
     private let statusLabel = NSTextField(labelWithString: "")
     private let spinner = NSProgressIndicator()
     /// Takes the field's place after a successful create — same row, so the
     /// popover doesn't change height and jump under the pointer.
     private let confirmation = NSStackView()
     private let confirmationLabel = NSTextField(labelWithString: "")
+    private let openButton = NSButton()
+    /// Hidden entirely when nothing is critical. A heading over an empty
+    /// list is a heading that trains you to stop reading it.
+    private let criticalSection = NSStackView()
+    private let criticalHeading = NSTextField(labelWithString: "")
+    private let criticalList = NSStackView()
 
     /// Called with the title to create. Returns when the task exists.
     var onSubmit: ((String) async -> Void)?
     var onEscape: (() -> Void)?
     var onOpenSettings: (() -> Void)?
+    /// The organisation name was clicked — show the picker, anchored to it.
+    var onPickOrganisation: ((NSView) -> Void)?
+    var onOpenTask: ((String) -> Void)?
+
+    private var createdTaskID: String?
 
     override init(frame: NSRect) {
         super.init(frame: frame)
@@ -38,10 +47,21 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         field.bezelStyle = .roundedBezel
         field.focusRingType = .none
 
-        orgLabel.font = .systemFont(ofSize: 11)
-        orgLabel.textColor = .secondaryLabelColor
-        orgLabel.lineBreakMode = .byTruncatingTail
-        orgLabel.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+        // A real button, not a label with a click handler: it has to *look*
+        // clickable, and the chevron is what says the organisation is a
+        // choice rather than a caption. Borderless keeps it as quiet as the
+        // label it replaced.
+        orgButton.bezelStyle = .inline
+        orgButton.isBordered = false
+        orgButton.font = .systemFont(ofSize: 11)
+        orgButton.contentTintColor = .secondaryLabelColor
+        orgButton.imagePosition = .imageTrailing
+        orgButton.image = NSImage(
+            systemSymbolName: "chevron.up.chevron.down", accessibilityDescription: nil)
+        orgButton.target = self
+        orgButton.action = #selector(pickOrganisation)
+        orgButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
         statusLabel.font = .systemFont(ofSize: 11)
         statusLabel.textColor = .secondaryLabelColor
         statusLabel.alignment = .right
@@ -60,8 +80,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         // lose the last letter, and no amount of compression-resistance
         // fiddling helps, because nothing is compressing it — it was handed
         // exactly what it asked for. Letting it stretch means there is
-        // always more room than the text needs, so the disagreement has
-        // nowhere to show up.
+        // always more room than the text needs.
         statusLabel.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
 
         spinner.style = .spinning
@@ -74,7 +93,14 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         tick.setContentHuggingPriority(.required, for: .horizontal)
         confirmationLabel.font = .systemFont(ofSize: 13)
         confirmationLabel.lineBreakMode = .byTruncatingTail
-        confirmation.setViews([tick, confirmationLabel], in: .leading)
+        openButton.title = "Open"
+        openButton.bezelStyle = .rounded
+        openButton.controlSize = .small
+        openButton.font = .systemFont(ofSize: 11)
+        openButton.target = self
+        openButton.action = #selector(openCreated)
+        openButton.setContentHuggingPriority(.required, for: .horizontal)
+        confirmation.setViews([tick, confirmationLabel, openButton], in: .leading)
         confirmation.orientation = .horizontal
         confirmation.spacing = 6
         confirmation.isHidden = true
@@ -83,36 +109,63 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         confirmation.heightAnchor.constraint(equalToConstant: 22).isActive = true
 
         // No spacer view: the status label is the thing that stretches now.
-        let footer = NSStackView(views: [orgLabel, spinner, statusLabel])
+        let footer = NSStackView(views: [orgButton, spinner, statusLabel])
         footer.orientation = .horizontal
         footer.spacing = 6
 
-        let stack = NSStackView(views: [field, confirmation, footer])
+        criticalHeading.font = .systemFont(ofSize: 11, weight: .medium)
+        criticalHeading.textColor = .systemRed
+        criticalList.orientation = .vertical
+        criticalList.spacing = 2
+        criticalList.alignment = .leading
+        let rule = NSBox()
+        rule.boxType = .separator
+        criticalSection.setViews([rule, criticalHeading, criticalList], in: .leading)
+        criticalSection.orientation = .vertical
+        criticalSection.spacing = 6
+        criticalSection.alignment = .leading
+        criticalSection.isHidden = true
+
+        let stack = NSStackView(views: [field, confirmation, footer, criticalSection])
         stack.orientation = .vertical
         stack.spacing = 8
+        stack.alignment = .leading
         stack.edgeInsets = NSEdgeInsets(top: 12, left: 12, bottom: 12, right: 12)
         stack.translatesAutoresizingMaskIntoConstraints = false
         addSubview(stack)
         NSLayoutConstraint.activate([
+            // A floor, because the popover is sized from `fittingSize` and
+            // that is a *fitting* size: with a short organisation name and
+            // nothing critical, the content happily fits in about 240pt,
+            // and the box you type into shrinks to match. A quick-capture
+            // field that changes width depending on what else is on screen
+            // is a worse thing than a little unused space.
+            widthAnchor.constraint(greaterThanOrEqualToConstant: 320),
             stack.topAnchor.constraint(equalTo: topAnchor),
             stack.bottomAnchor.constraint(equalTo: bottomAnchor),
             stack.leadingAnchor.constraint(equalTo: leadingAnchor),
             stack.trailingAnchor.constraint(equalTo: trailingAnchor),
+            field.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            confirmation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            criticalSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            rule.widthAnchor.constraint(equalTo: criticalSection.widthAnchor),
         ])
     }
 
     /// Called every time the popover opens, not just once: the organisation
-    /// can change in Settings while this view is alive, and a stale label
-    /// would be a quiet lie about where the next task is going.
+    /// can change while this view is alive, and a stale label would be a
+    /// quiet lie about where the next task is going.
     func refresh() {
         clearConfirmation()
         if Settings.isConfigured {
-            orgLabel.stringValue = Settings.organisationName ?? "Unknown organisation"
+            orgButton.title = Settings.organisationName ?? "Unknown organisation"
+            orgButton.isEnabled = true
             field.isEnabled = true
             statusLabel.stringValue = "⏎ to create"
         } else {
-            orgLabel.stringValue = "Not set up"
+            orgButton.title = "Not set up"
+            orgButton.isEnabled = false
             field.isEnabled = false
             statusLabel.stringValue = "Open Settings…"
         }
@@ -123,6 +176,57 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         statusLabel.textColor = .secondaryLabelColor
         field.stringValue = ""
         window?.makeFirstResponder(field)
+    }
+
+    // MARK: - Critical tasks
+
+    /// `nil` means "no answer yet", which renders the same as none — but
+    /// only one of the two should stay that way, and the caller can tell
+    /// them apart.
+    func showCritical(_ tasks: [MCPClient.TaskSummary]?) {
+        criticalList.setViews([], in: .leading)
+        guard let tasks = tasks, !tasks.isEmpty else {
+            criticalSection.isHidden = true
+            return
+        }
+        criticalSection.isHidden = false
+        criticalHeading.stringValue = tasks.count == 1
+            ? "1 critical task of yours"
+            : "\(tasks.count) critical tasks of yours"
+        // Five, then a count. A popover that grows without limit stops being
+        // a popover, and anybody with more than five critical tasks has a
+        // problem this list can't help with anyway.
+        for task in tasks.prefix(5) {
+            let row = NSButton(title: task.title, target: self, action: #selector(openCritical(_:)))
+            row.bezelStyle = .inline
+            row.isBordered = false
+            row.font = .systemFont(ofSize: 12)
+            row.alignment = .left
+            row.contentTintColor = .labelColor
+            row.identifier = NSUserInterfaceItemIdentifier(task.id)
+            row.lineBreakMode = .byTruncatingTail
+            criticalList.addView(row, in: .leading)
+        }
+        if tasks.count > 5 {
+            let more = NSTextField(labelWithString: "and \(tasks.count - 5) more")
+            more.font = .systemFont(ofSize: 11)
+            more.textColor = .secondaryLabelColor
+            criticalList.addView(more, in: .leading)
+        }
+    }
+
+    // MARK: - Actions
+
+    @objc private func pickOrganisation() {
+        onPickOrganisation?(orgButton)
+    }
+
+    @objc private func openCreated() {
+        if let id = createdTaskID { onOpenTask?(id) }
+    }
+
+    @objc private func openCritical(_ sender: NSButton) {
+        if let id = sender.identifier?.rawValue { onOpenTask?(id) }
     }
 
     func control(_ control: NSControl, textView: NSTextView, doCommandBy selector: Selector) -> Bool {
@@ -173,11 +277,18 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
     /// can miss completely, and missing it on a capture tool means
     /// wondering whether to type the thing again. So the whole box says it
     /// instead: the field is replaced by the title that was filed, under a
-    /// green tick, and it stays up long enough to actually read.
-    func confirm(title: String) {
+    /// green tick, with a way straight to it.
+    ///
+    /// **Open appears only when there is an id to open.** The id is parsed
+    /// out of the server's prose answer, so if that ever changes shape the
+    /// button disappears rather than opening the web app at a URL with a
+    /// hole in it.
+    func confirm(title: String, taskID: String?) {
         field.isHidden = true
         confirmation.isHidden = false
         confirmationLabel.stringValue = title
+        createdTaskID = taskID
+        openButton.isHidden = taskID == nil
         statusLabel.stringValue = "Created"
         statusLabel.textColor = .systemGreen
     }
@@ -189,5 +300,6 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
     private func clearConfirmation() {
         field.isHidden = false
         confirmation.isHidden = true
+        createdTaskID = nil
     }
 }

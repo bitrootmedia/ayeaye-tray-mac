@@ -3,7 +3,12 @@
 A menu bar text box that creates a task in [ayeaye](https://github.com/bitrootmedia/ayeaye).
 One field, Enter, done — for the thought you have while doing something else.
 
-⌃⌥Space from anywhere, or click the icon.
+⌃⌥Space from anywhere, or click the anchor.
+
+After it files a task you get a green tick, the title back, and **Open** to
+jump to it in the web app. Click the organisation name to file into a
+different one. And if any of your tasks are **critical**, the anchor turns red
+with a count beside it and the popover lists them — click one to open it.
 
 ## Why it's its own repo
 
@@ -65,6 +70,28 @@ One test, for the one thing that shipped broken: that ⌘V works. See the
 `check` target for why it needs a real event loop and a logged-in session.
 
 ## Choices worth knowing about
+
+- **The icon is the web app's own anchor**, drawn from lucide's path data
+  rather than shipped as an asset — there is no anchor in SF Symbols, and a
+  PNG would need three sizes, two appearances, and would be a second place
+  the brand's icon lives. As a template image it takes the menu bar's colour
+  in light mode, dark mode and while its menu is open.
+- **Critical turns the same anchor red rather than swapping in a bell.** The
+  icon is how this app is found in a crowded menu bar; changing its shape
+  means hunting for something that isn't there. Colour says "look", the
+  count says "how much".
+- **Critical means *yours*, not the organisation's.** The server's own
+  `mine_only` filter, which resolves to tasks you own — the same set the web
+  dashboard's Critical card shows. An admin can see every task in the
+  company, and colouring the icon for all of them would make it permanently
+  red and permanently ignored.
+- **It polls every five minutes**, and whenever you open the box. There is
+  nothing to subscribe to: the server's realtime channel authenticates with
+  a session cookie this app deliberately doesn't have. Five minutes is
+  chosen to be useless as a notification and useful as a status light.
+- **A failed poll leaves the icon as it was.** "We couldn't check" and
+  "nothing is critical" are different answers, and only one of them is safe
+  to show as calm.
 
 - **There is an Edit menu you can never see.** A menu bar app displays no
   menus, but AppKit implements ⌘X/⌘C/⌘V/⌘A as *main menu key equivalents*,
