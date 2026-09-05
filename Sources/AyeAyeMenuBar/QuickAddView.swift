@@ -113,14 +113,32 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         footer.orientation = .horizontal
         footer.spacing = 6
 
+        // Red as a dot, with the words at full contrast beside it.
+        //
+        // The heading was `.systemRed` text and it was reported unreadable —
+        // correctly: system red at 11pt on the popover's own light grey is
+        // right at the edge of legible, and this is a line you are meant to
+        // read at a glance. It is the same rule the web app already settled
+        // on for status ("colour lives in a dot, not a pill" — a table of
+        // saturated text is confetti, and the dot keeps the label at full
+        // contrast). The red is still there and still means the same thing;
+        // it just stopped being the thing the words are made of.
+        let dot = NSImageView()
+        dot.image = NSImage(systemSymbolName: "circle.fill", accessibilityDescription: nil)
+        dot.symbolConfiguration = .init(pointSize: 7, weight: .regular)
+        dot.contentTintColor = .systemRed
+        dot.setContentHuggingPriority(.required, for: .horizontal)
         criticalHeading.font = .systemFont(ofSize: 11, weight: .medium)
-        criticalHeading.textColor = .systemRed
+        criticalHeading.textColor = .labelColor
+        let headingRow = NSStackView(views: [dot, criticalHeading])
+        headingRow.orientation = .horizontal
+        headingRow.spacing = 5
         criticalList.orientation = .vertical
         criticalList.spacing = 2
         criticalList.alignment = .leading
         let rule = NSBox()
         rule.boxType = .separator
-        criticalSection.setViews([rule, criticalHeading, criticalList], in: .leading)
+        criticalSection.setViews([rule, headingRow, criticalList], in: .leading)
         criticalSection.orientation = .vertical
         criticalSection.spacing = 6
         criticalSection.alignment = .leading
@@ -191,8 +209,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate {
         }
         criticalSection.isHidden = false
         criticalHeading.stringValue = tasks.count == 1
-            ? "1 critical task of yours"
-            : "\(tasks.count) critical tasks of yours"
+            ? "1 critical task waiting for you"
+            : "\(tasks.count) critical tasks waiting for you"
         // Five, then a count. A popover that grows without limit stops being
         // a popover, and anybody with more than five critical tasks has a
         // problem this list can't help with anyway.

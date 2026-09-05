@@ -178,29 +178,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     ///
     /// Ordinary: the web app's anchor, as a template image, so it takes the
     /// menu bar's own colour in light mode, dark mode and while its menu is
-    /// open. Critical: the same anchor in red, with the count beside it —
-    /// the same shape deliberately, because the icon is how this app is
-    /// found in a crowded menu bar and swapping it for a bell means hunting
-    /// for something that isn't there. Colour says "look", the number says
-    /// "how much". Just created: a green tick, briefly, which outranks both
-    /// because it is answering something you did a second ago.
+    /// open. Critical: the same anchor, red — the same shape deliberately,
+    /// because the icon is how this app is found in a crowded menu bar and
+    /// swapping it for a bell means hunting for something that isn't there.
+    /// Just created: a green tick, briefly, which outranks both because it
+    /// is answering something you did a second ago.
+    ///
+    /// **No count beside it.** It had one; red already says the only thing
+    /// the menu bar needs to say, and a number there is a second thing to
+    /// read in the one place on screen with the least room to read it. The
+    /// count is in the popover, where it can be a sentence.
     private func updateIcon() {
-        guard let button = statusItem.button, flashToken == 0 || !flashing else { return }
-        if critical.isEmpty {
-            button.image = AnchorIcon.image()
-            button.contentTintColor = nil
-            button.title = ""
-        } else {
-            button.image = AnchorIcon.alert()
-            button.contentTintColor = nil
-            button.title = " \(critical.count)"
-            button.attributedTitle = NSAttributedString(
-                string: " \(critical.count)",
-                attributes: [
-                    .foregroundColor: NSColor.systemRed,
-                    .font: NSFont.systemFont(ofSize: 11, weight: .medium),
-                ])
-        }
+        guard let button = statusItem.button, !flashing else { return }
+        button.image = critical.isEmpty ? AnchorIcon.image() : AnchorIcon.alert()
+        button.contentTintColor = nil
+        button.title = ""
     }
 
     // MARK: - Switching organisation

@@ -7,8 +7,8 @@ One field, Enter, done — for the thought you have while doing something else.
 
 After it files a task you get a green tick, the title back, and **Open** to
 jump to it in the web app. Click the organisation name to file into a
-different one. And if any of your tasks are **critical**, the anchor turns red
-with a count beside it and the popover lists them — click one to open it.
+different one. And if any of your tasks are **critical**, the anchor turns red and the
+popover lists them — click one to open it.
 
 ## Why it's its own repo
 
@@ -78,8 +78,13 @@ One test, for the one thing that shipped broken: that ⌘V works. See the
   in light mode, dark mode and while its menu is open.
 - **Critical turns the same anchor red rather than swapping in a bell.** The
   icon is how this app is found in a crowded menu bar; changing its shape
-  means hunting for something that isn't there. Colour says "look", the
-  count says "how much".
+  means hunting for something that isn't there. No count beside it either —
+  red already says the only thing the menu bar needs to, and a number there
+  is a second thing to read in the place with the least room to read it.
+- **In the popover, the red is a dot and the words are at full contrast.**
+  The heading was red text and it was unreadable on the popover's grey. Same
+  rule the web app settled on for status: colour lives in a dot, not in the
+  words.
 - **Critical means *yours*, not the organisation's.** The server's own
   `mine_only` filter, which resolves to tasks you own — the same set the web
   dashboard's Critical card shows. An admin can see every task in the
