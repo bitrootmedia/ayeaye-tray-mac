@@ -13,6 +13,11 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
     private let orgPopUp = NSPopUpButton()
     private let statusLabel = NSTextField(labelWithString: "")
     private var organisations: [MCPClient.Organisation] = []
+    /// Server, token or organisation just changed — anything holding a
+    /// connection based on the old ones needs to know. Without this, the
+    /// first-run case (configure, save, then wait) left the socket
+    /// unopened until the next launch.
+    var onSaved: (() -> Void)?
 
     convenience init() {
         let window = NSWindow(
@@ -110,6 +115,7 @@ final class SettingsWindow: NSWindowController, NSWindowDelegate {
         }
         Settings.organisationID = organisations[index].id
         Settings.organisationName = organisations[index].name
+        onSaved?()
         window?.close()
     }
 

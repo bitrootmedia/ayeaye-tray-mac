@@ -12,6 +12,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arrives after the keystroke that asked for it.
     private var critical: [MCPClient.TaskSummary] = []
     private var criticalTimer: Timer?
+    private let realtime = RealtimeClient()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Before any window or field exists: without it, ⌘V is dead app-wide.
@@ -42,6 +43,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         registerHotKey()
         startWatchingCritical()
 
+        // The socket says *something moved*; what moved is refetched, the
+        // same one-authorisation-path discipline the web app follows.
+        realtime.onChange = { [weak self] in
+            guard let self = self else { return }
+            Task { await self.refreshCritical() }
+        }
+        // A slept-through laptop has a socket the OS killed and a backoff
+        // timer minutes from firing. Waking is the moment to stop waiting.
+        NSWorkspace.shared.notificationCenter.addObserver(
+            forName: NSWorkspace.didWakeNotification, object: nil, queue: .main
+        ) { [weak self] _ in
+            guard let self = self else { return }
+            self.realtime.reconnectNow()
+            Task { await self.refreshCritical() }
+        }
+        connectRealtime()
+
         // Nothing configured yet means nothing this app can do, so it opens
         // the one screen that fixes that rather than leaving a new user
         // clicking an icon that shows a disabled text box.
@@ -51,6 +69,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let ref = hotKeyRef { UnregisterEventHotKey(ref) }
         criticalTimer?.invalidate()
+        realtime.disconnect()
+    }
+
+    /// Opened once configured, and reopened whenever the organisation or the
+    /// credential changes — the watch is scoped to one organisation, so
+    /// switching is a different subscription, not a filter.
+    private func connectRealtime() {
+        guard Settings.isConfigured, let org = Settings.organisationID else {
+            realtime.disconnect()
+            return
+        }
+        realtime.connect(organisationID: org)
     }
 
     // MARK: - The menu bar item
@@ -111,7 +141,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc func openSettings() {
         popover.performClose(nil)
-        if settingsWindow == nil { settingsWindow = SettingsWindow() }
+        if settingsWindow == nil {
+            let window = SettingsWindow()
+            window.onSaved = { [weak self] in
+                guard let self = self else { return }
+                self.quickAdd.refresh()
+                self.connectRealtime()
+                Task { await self.refreshCritical() }
+            }
+            settingsWindow = window
+        }
         settingsWindow?.show()
     }
 
@@ -246,6 +285,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         critical = []
         quickAdd.showCritical(nil)
         updateIcon()
+        connectRealtime()
         Task { await refreshCritical() }
     }
 
@@ -261,16 +301,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Critical tasks
 
-    /// Every five minutes, and whenever the popover opens.
+    /// The backstop, every twenty minutes, plus whenever the popover opens.
     ///
-    /// Polling, because there is nothing to subscribe to: the server has a
-    /// realtime channel, but it authenticates with a session cookie this app
-    /// deliberately does not have (see MCPClient). Five minutes is chosen to
-    /// be useless as a notification and useful as a status light — something
-    /// marked critical while you were in a meeting will be red by the time
-    /// you look up, which is all this needs to do.
+    /// **The socket is the mechanism now** (see RealtimeClient) — this used
+    /// to be it, at five minutes. It stays, longer, because a dropped socket
+    /// fails silently by its nature: nothing arrives, which is exactly what
+    /// nothing happening looks like. Reconnect logic covers the cases it can
+    /// see; a poll covers the ones it can't.
     private func startWatchingCritical() {
-        criticalTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+        criticalTimer = Timer.scheduledTimer(withTimeInterval: 1200, repeats: true) { [weak self] _ in
             guard let self = self else { return }
             Task { await self.refreshCritical() }
         }

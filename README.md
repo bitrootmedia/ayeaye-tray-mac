@@ -8,7 +8,8 @@ One field, Enter, done — for the thought you have while doing something else.
 After it files a task you get a green tick, the title back, and **Open** to
 jump to it in the web app. Click the organisation name to file into a
 different one. And if any of your tasks are **critical**, the anchor turns red and the
-popover lists them — click one to open it.
+popover lists them — click one to open it. That updates **live**: change
+something on the web and the tray follows in well under a second.
 
 ## Why it's its own repo
 
@@ -90,10 +91,26 @@ One test, for the one thing that shipped broken: that ⌘V works. See the
   dashboard's Critical card shows. An admin can see every task in the
   company, and colouring the icon for all of them would make it permanently
   red and permanently ignored.
-- **It polls every five minutes**, and whenever you open the box. There is
-  nothing to subscribe to: the server's realtime channel authenticates with
-  a session cookie this app deliberately doesn't have. Five minutes is
-  chosen to be useless as a notification and useful as a status light.
+- **It's pushed, not polled.** ayeaye already runs a WebSocket that
+  publishes every task change to an `org:<id>` channel — the web board
+  watches exactly that — and the server now accepts a personal access token
+  on the handshake alongside the browser's cookie, so this app can watch it
+  too. Measured end to end: ~180ms from a change on the web to the icon
+  here.
+- **The token goes in a header, not the URL.** A browser can't set headers
+  on a WebSocket handshake, which is why query-string tokens exist as a
+  pattern — and why they end up in server logs. A native client has no such
+  limit.
+- **A 20-minute poll stays, as a backstop.** A dropped socket fails
+  silently by its nature: nothing arrives, which is exactly what nothing
+  happening looks like. Reconnect-with-backoff covers what it can see, plus
+  a reconnect on wake — a slept laptop has a socket the OS killed — and the
+  poll covers the rest.
+- **The watch is re-sent on every reconnect.** It's server-side state
+  belonging to a socket that just died; a client that forgets it comes back
+  connected, healthy and deaf. `make check` doesn't cover this one, but
+  there's a harness in the commit history that restarts the API underneath
+  a live client and waits for the push to resume.
 - **A failed poll leaves the icon as it was.** "We couldn't check" and
   "nothing is critical" are different answers, and only one of them is safe
   to show as calm.

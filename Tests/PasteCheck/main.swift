@@ -29,6 +29,15 @@ final class Runner: NSObject, NSApplicationDelegate {
         )
         field = NSSecureTextField(frame: NSRect(x: 10, y: 10, width: 280, height: 24))
         window.contentView?.addSubview(field)
+        // Activated, not merely key — and it has to be. Dropping the
+        // `activate` on the theory that a key window was enough made this
+        // fail five times out of five: `paste:` reaches the field editor
+        // through the responder chain of the *active* app.
+        //
+        // The price is that this test takes focus for a second and can be
+        // polluted by whatever you type while it runs. Run it on a machine
+        // you are not typing on; it is not a test to leave in a loop beside
+        // your editor.
         window.makeKeyAndOrderFront(nil)
         NSApp.activate(ignoringOtherApps: true)
         window.makeFirstResponder(field)
@@ -55,7 +64,13 @@ final class Runner: NSObject, NSApplicationDelegate {
             let got = self.field.stringValue
             print("first responder: \(firstResponder)")
             print("field now holds: \(got.isEmpty ? "(nothing)" : got)")
-            if got == secret {
+            // `contains`, not `==`. This harness activates a real app with a
+            // real key window, so a keystroke aimed at anything else on the
+            // machine can land in the field while it runs — seen once, as a
+            // stray "?" before an otherwise perfectly pasted token. The claim
+            // being tested is that ⌘V delivered the pasteboard, not that
+            // nothing else in the world touched the field.
+            if got.contains(secret) {
                 print("PASS — ⌘V reached a secure field")
                 exit(0)
             }
