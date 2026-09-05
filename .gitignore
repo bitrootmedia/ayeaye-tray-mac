@@ -1,0 +1,4 @@
+.build/
+AyeAye.app/
+.DS_Store
+*.xcuserstate
