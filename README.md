@@ -55,8 +55,22 @@ AYEAYE_SERVER=https://ayeayecaptain.io AYEAYE_TOKEN=ayc_… AYEAYE_ORG=<uuid> \
 an argument — every process on the machine can read another's command line out of
 `ps`, and this is a bearer credential.
 
+## Test
+
+```sh
+make check
+```
+
+One test, for the one thing that shipped broken: that ⌘V works. See the
+`check` target for why it needs a real event loop and a logged-in session.
+
 ## Choices worth knowing about
 
+- **There is an Edit menu you can never see.** A menu bar app displays no
+  menus, but AppKit implements ⌘X/⌘C/⌘V/⌘A as *main menu key equivalents*,
+  not as text field behaviour — so without a main menu, every field in the
+  app silently refuses to paste while accepting typing perfectly well. Which
+  is no use at all when the thing you need to enter is a token.
 - **The token lives in the Keychain**, not `UserDefaults` — a plist in your home
   directory that every process you run can read is the wrong place for a
   credential that can act as you.

@@ -9,6 +9,10 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var hotKeyRef: EventHotKeyRef?
 
     func applicationDidFinishLaunching(_ notification: Notification) {
+        // Before any window or field exists: without it, ⌘V is dead app-wide.
+        // See EditMenu.swift — this is not decoration, it is the paste key.
+        EditMenu.install()
+
         statusItem = NSStatusBar.system.statusItem(withLength: NSStatusItem.variableLength)
         if let button = statusItem.button {
             // A template image takes the menu bar's own colour, so it follows

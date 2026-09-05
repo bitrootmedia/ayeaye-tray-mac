@@ -10,7 +10,7 @@ APP     = AyeAye.app
 BINARY  = .build/release/AyeAyeMenuBar
 DEST    = $(APP)/Contents/MacOS/AyeAyeMenuBar
 
-.PHONY: all build app install run clean
+.PHONY: all build app install run check clean
 
 all: app
 
@@ -39,6 +39,22 @@ install: app
 
 run: app
 	open $(APP)
+
+# The one thing here worth a test: that ⌘V works.
+#
+# It shipped broken — a menu bar app has no main menu, and AppKit implements
+# paste as a main-menu key equivalent, so every text field silently refused
+# to paste while accepting typing normally. That is invisible to a compiler
+# and to any test that doesn't run a real event loop, which is why this one
+# does: it starts the app, focuses a secure field, sends a real ⌘V through
+# NSApp.sendEvent, and checks the token arrived. Needs a logged-in window
+# server, so it is a `make check` rather than something a headless CI runs.
+#
+# It compiles the app's own EditMenu.swift, not a copy — a test of a replica
+# would have passed against the broken app.
+check:
+	@swiftc Sources/AyeAyeMenuBar/EditMenu.swift Tests/PasteCheck/main.swift -o .build/pastecheck
+	@./.build/pastecheck
 
 clean:
 	rm -rf .build $(APP)
