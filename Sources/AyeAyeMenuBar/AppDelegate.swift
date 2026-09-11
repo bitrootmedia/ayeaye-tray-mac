@@ -12,6 +12,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// arrives after the keystroke that asked for it.
     private var critical: [MCPClient.TaskSummary] = []
     private var criticalTimer: Timer?
+    /// Unread notifications, for the badge. Held for the same reason
+    /// `critical` is: the icon has to be right the moment it is drawn.
+    private var unread = 0
+    private var unreadTimer: Timer?
+    /// What you are timing, if anything — for the pip on the icon and the
+    /// row in the popover. Held for the third time for the third time's
+    /// reason: the icon is drawn before anything can be asked.
+    private var timing: MCPClient.RunningTimer?
+    private var timingTimer: Timer?
     private let realtime = RealtimeClient()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
@@ -36,18 +45,57 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
         quickAdd.onEscape = { [weak self] in self?.popover.performClose(nil) }
         quickAdd.onOpenSettings = { [weak self] in self?.openSettings() }
-        quickAdd.onSubmit = { [weak self] title in await self?.create(title: title) }
+        quickAdd.onSubmit = { [weak self] draft in await self?.create(draft) }
+        quickAdd.onSubmitSpark = { [weak self] body in await self?.capture(body) }
         quickAdd.onPickOrganisation = { [weak self] anchor in self?.pickOrganisation(from: anchor) }
-        quickAdd.onOpenTask = { [weak self] id in self?.openInWeb(taskID: id) }
+        quickAdd.onOpen = { [weak self] destination in
+            guard let self = self else { return }
+            switch destination {
+            case let .task(id):
+                self.openInWeb(taskID: id, organisationID: Settings.organisationID)
+            case .timedTask:
+                // The timer's own organisation, not the selected one. They
+                // are usually the same and the whole point of the timer not
+                // being org-scoped is the times they aren't — a link built
+                // from the wrong one opens a page that says the task does
+                // not exist.
+                if let timing = self.timing {
+                    self.openInWeb(
+                        taskID: timing.taskID, organisationID: timing.organisationID)
+                }
+            case .sparks:
+                self.openSparks()
+            }
+        }
+        quickAdd.onNeedsLists = { [weak self] in self?.loadLists() }
+        quickAdd.onResize = { [weak self] in self?.sizePopover() }
+        quickAdd.onStopTimer = { [weak self] in self?.stopTiming() }
 
         registerHotKey()
         startWatchingCritical()
+        startWatchingUnread()
+        startWatchingTimer()
 
         // The socket says *something moved*; what moved is refetched, the
         // same one-authorisation-path discipline the web app follows.
         realtime.onChange = { [weak self] in
             guard let self = self else { return }
+            // The socket carries task events, not notification ones — but the
+            // things that raise a notification for you (somebody asking you
+            // to act, handing you a task) are task changes, so a nudge is a
+            // good moment to recount. It is not a substitute for the timer:
+            // a notification can arrive from a place this socket isn't
+            // watching, since the badge counts every organisation and the
+            // socket watches one.
             Task { await self.refreshCritical() }
+            Task { await self.refreshUnread() }
+            // Starting and stopping a timer announce themselves as task
+            // changes on the server (time is task history), so a nudge is
+            // exactly when to re-ask what is running. Not a substitute for
+            // the timer below, for the same reason as the badge: one running
+            // timer exists per person across every organisation, and this
+            // socket watches one.
+            Task { await self.refreshTiming() }
         }
         // A slept-through laptop has a socket the OS killed and a backoff
         // timer minutes from firing. Waking is the moment to stop waiting.
@@ -57,6 +105,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             guard let self = self else { return }
             self.realtime.reconnectNow()
             Task { await self.refreshCritical() }
+            Task { await self.refreshUnread() }
+            Task { await self.refreshTiming() }
         }
         connectRealtime()
 
@@ -69,6 +119,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     func applicationWillTerminate(_ notification: Notification) {
         if let ref = hotKeyRef { UnregisterEventHotKey(ref) }
         criticalTimer?.invalidate()
+        unreadTimer?.invalidate()
+        timingTimer?.invalidate()
         realtime.disconnect()
     }
 
@@ -99,7 +151,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     private func showMenu() {
         let menu = NSMenu()
-        menu.addItem(withTitle: "New task…", action: #selector(togglePopover), keyEquivalent: "")
+        // Both by name. The popover remembers which mode it was last in, so
+        // the hotkey opens whichever you used last — and this is the place
+        // that says the other one exists, and opens straight into it.
+        menu.addItem(withTitle: "New task…", action: #selector(newTask), keyEquivalent: "")
+        menu.addItem(withTitle: "New spark…", action: #selector(newSpark), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(.separator())
@@ -116,6 +172,26 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         statusItem.menu = nil
     }
 
+    @objc private func newTask() { showPopover(sparkMode: false) }
+    @objc private func newSpark() { showPopover(sparkMode: true) }
+
+    /// Open the box in a named mode, from the menu that named it. Never a
+    /// toggle: picking "New spark…" from a menu and having the box shut
+    /// because it happened to be open already would be a strange answer.
+    private func showPopover(sparkMode: Bool) {
+        // Before the popover is shown, so `refresh()` lays it out in the
+        // right mode first time rather than in one and then the other. On an
+        // already-open box it changes the mode and leaves what you typed
+        // alone — the words are the same words whichever of the two this
+        // turns out to be.
+        quickAdd.setSparkMode(sparkMode)
+        if popover.isShown {
+            sizePopover()
+            return
+        }
+        togglePopover()
+    }
+
     @objc func togglePopover() {
         guard let button = statusItem.button else { return }
         if popover.isShown {
@@ -124,6 +200,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         quickAdd.refresh()
         quickAdd.showCritical(critical)
+        quickAdd.showTiming(timing)
         // Sized to whatever the content now needs — the critical list makes
         // this view a different height on different days, and a popover with
         // a fixed contentSize would clip it.
@@ -137,6 +214,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // so it is worth a fresh look at what's critical even though the
         // timer will come round anyway.
         Task { await refreshCritical() }
+        Task { await refreshUnread() }
+        Task { await refreshTiming() }
+        // Only for somebody who left the panel open, and only if this
+        // organisation's lists aren't already in hand.
+        if quickAdd.detailsAreVisible && listsLoadedFor != Settings.organisationID { loadLists() }
     }
 
     @objc func openSettings() {
@@ -157,20 +239,97 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     // MARK: - Creating
 
     @MainActor
-    private func create(title: String) async {
+    private func create(_ draft: MCPClient.Draft) async {
         guard let org = Settings.organisationID else {
             quickAdd.report("No organisation set.", isError: true)
             return
         }
         do {
             let client = try MCPClient.fromSettings()
-            let id = try await client.createTask(title: title, organisationID: org)
-            quickAdd.confirm(title: title, taskID: id)
-            flashCreated()
+            let id = try await client.createTask(draft, organisationID: org)
+            var saying = "Task created"
+            // The timer is a second call, and it is made here rather than
+            // inside `createTask` because it can fail on its own: the task
+            // exists either way, and a create that reported failure because
+            // the clock didn't start would be lying about the important half.
+            //
+            // **It needs the id**, which is parsed out of the server's prose
+            // answer — so if that ever changes shape this says so rather than
+            // silently not starting anything. The same parse already decides
+            // whether the confirmation gets an Open button; this is the one
+            // place it not working actually costs something.
+            var problem: String?
+            if draft.startTimer {
+                if let id = id {
+                    do {
+                        let displaced = try await client.startTimer(
+                            taskID: id, organisationID: org)
+                        // The server stops whatever was already running and
+                        // says so. Worth repeating: somebody who forgot a
+                        // timer was going has just lost the end of it, and
+                        // finding that out from a timesheet next week is
+                        // worse than reading it here.
+                        saying = displaced == nil
+                            ? "Timer started" : "Timer moved to the new task"
+                    } catch {
+                        problem = "Created, but the timer didn't start: "
+                            + error.localizedDescription
+                    }
+                } else {
+                    problem = "Created, but couldn't tell which task to time."
+                }
+            }
+            // **The confirmation goes up either way, before any complaint
+            // about the timer.** The task exists, and the confirmation is
+            // what takes the typed text out of the field — reporting the
+            // timer's failure instead would leave the title sitting there
+            // under an error, which reads as "that didn't work, try again"
+            // and files the same task twice.
+            quickAdd.confirm(title: draft.title, opens: id.map { .task($0) })
+            flashCreated(saying: saying)
+            if let problem = problem {
+                // After `confirm`, which owns the status line and would
+                // otherwise paint "Created" in green over the top of this.
+                quickAdd.report(problem, isError: true)
+                // And left open, rather than closed after the usual second
+                // and a half: this is the one outcome here somebody has to
+                // read, and possibly act on.
+                await refreshTiming()
+                return
+            }
             // Long enough to read the title back and be sure it was the one
             // you meant, short enough not to be in the way of the next
             // thought. The menu bar tick outlasts it deliberately, so the
             // confirmation survives the popover closing.
+            try? await Task.sleep(nanoseconds: 1_400_000_000)
+            popover.performClose(nil)
+            // After the popover, not before: the indicator's job starts the
+            // moment the box is gone, and asking the server what is running
+            // is the same one authorisation path everything else here uses
+            // rather than assuming the call that just succeeded did what it
+            // said. It also picks up the elapsed time and the title, which
+            // `start_timer`'s own answer doesn't carry.
+            if draft.startTimer { await refreshTiming() }
+        } catch {
+            quickAdd.report(error.localizedDescription, isError: true)
+        }
+    }
+
+    /// The other half of `create`: one field, and nowhere for it to be
+    /// filed wrong.
+    ///
+    /// No organisation is read here at all — a spark carries none, so this
+    /// works on an account that has not been invited anywhere yet, which is
+    /// the one case where the task path can't work.
+    @MainActor
+    private func capture(_ body: String) async {
+        do {
+            let client = try MCPClient.fromSettings()
+            _ = try await client.createSpark(body: body)
+            // Open goes to the Sparks screen: a spark has no page of its
+            // own, and the list is where you review what has piled up.
+            quickAdd.confirm(title: body, opens: .sparks)
+            flashCreated(saying: "Spark saved")
             try? await Task.sleep(nanoseconds: 1_400_000_000)
             popover.performClose(nil)
         } catch {
@@ -193,13 +352,13 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var flashToken = 0
     private var flashing = false
 
-    private func flashCreated() {
+    private func flashCreated(saying what: String) {
         guard let button = statusItem.button else { return }
         flashToken += 1
         flashing = true
         let mine = flashToken
         button.image = NSImage(
-            systemSymbolName: "checkmark.circle.fill", accessibilityDescription: "Task created")
+            systemSymbolName: "checkmark.circle.fill", accessibilityDescription: what)
         button.contentTintColor = .systemGreen
         button.title = ""
         DispatchQueue.main.asyncAfter(deadline: .now() + 2.0) { [weak self] in
@@ -229,9 +388,61 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// count is in the popover, where it can be a sentence.
     private func updateIcon() {
         guard let button = statusItem.button, !flashing else { return }
-        button.image = critical.isEmpty ? AnchorIcon.image() : AnchorIcon.alert()
+        let running = timing != nil
+        button.image = critical.isEmpty
+            ? AnchorIcon.image(badge: unread, timing: running)
+            : AnchorIcon.alert(badge: unread, timing: running)
         button.contentTintColor = nil
         button.title = ""
+        // Both, when there are both — the icon now carries two marks and a
+        // tooltip that mentioned one of them would be the wrong half of the
+        // answer as often as not.
+        var lines: [String] = []
+        if let timing = timing { lines.append("Timing: \(timing.title)") }
+        if unread == 1 { lines.append("1 unread notification") }
+        if unread > 1 { lines.append("\(unread) unread notifications") }
+        button.toolTip = lines.isEmpty ? nil : lines.joined(separator: "\n")
+    }
+
+    // MARK: - The Details panel's two menus
+
+    /// Fetched once per organisation, then reused.
+    ///
+    /// Not fetched on launch, and not on every open: this is two requests
+    /// that only matter to somebody who has opened the Details panel, and a
+    /// quick-capture box should not spend anything at all on a panel most
+    /// uses of it never see. The first expansion pays for both, and a
+    /// changed organisation throws them away — see `chooseOrganisation`.
+    private var listsLoadedFor: String?
+
+    private func loadLists() {
+        guard Settings.isConfigured, let org = Settings.organisationID else { return }
+        Task { @MainActor in
+            let client = try? MCPClient.fromSettings()
+            // Concurrently, because they are two independent reads and this
+            // is happening under somebody's pointer.
+            async let projects = client?.projects(organisationID: org)
+            async let members = client?.members(organisationID: org)
+            let (loadedProjects, loadedMembers) = (try? await projects, try? await members)
+            // The organisation can be switched while these are in flight,
+            // and filling one organisation's menus with another's projects
+            // is worse than an empty menu.
+            guard Settings.organisationID == org else { return }
+            quickAdd.showLists(projects: loadedProjects, members: loadedMembers)
+            // Only a complete answer is worth keeping. A failed fetch that
+            // marked itself loaded would leave "Couldn't load projects" in
+            // the menu until the app restarted.
+            if loadedProjects != nil && loadedMembers != nil { listsLoadedFor = org }
+            sizePopover()
+        }
+    }
+
+    /// The popover is sized from the content's `fittingSize`, and the content
+    /// is a different height with the Details panel open, with a longer
+    /// project name in a menu, or with critical tasks listed.
+    private func sizePopover() {
+        guard popover.isShown else { return }
+        popover.contentSize = quickAdd.fittingSize
     }
 
     // MARK: - Switching organisation
@@ -278,6 +489,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         Settings.organisationID = id
         Settings.organisationName = sender.title
         quickAdd.refresh()
+        // Another organisation's projects and people, which is not a list to
+        // leave in a menu that files work somewhere.
+        listsLoadedFor = nil
+        quickAdd.forgetLists()
+        if quickAdd.detailsAreVisible { loadLists() }
+        // The badge is deliberately not cleared here: unread notifications
+        // are counted across every organisation, so switching doesn't change
+        // the number.
+        //
         // The old organisation's critical tasks are not this one's. Cleared
         // rather than left on screen while the new answer is in flight —
         // showing one organisation's work under another's name is worse
@@ -291,10 +511,18 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     // MARK: - Opening things in the browser
 
-    private func openInWeb(taskID: String) {
-        guard let base = Settings.baseURL, let org = Settings.organisationID,
+    private func openInWeb(taskID: String, organisationID: String?) {
+        guard let base = Settings.baseURL, let org = organisationID,
               let url = MCPClient.webURL(base: base, organisationID: org, taskID: taskID)
         else { return }
+        NSWorkspace.shared.open(url)
+        popover.performClose(nil)
+    }
+
+    /// The Sparks screen, which is not under an organisation — see
+    /// `MCPClient.sparksURL`.
+    private func openSparks() {
+        guard let base = Settings.baseURL, let url = MCPClient.sparksURL(base: base) else { return }
         NSWorkspace.shared.open(url)
         popover.performClose(nil)
     }
@@ -333,7 +561,126 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             return
         }
         updateIcon()
-        if popover.isShown { quickAdd.showCritical(critical) }
+        if popover.isShown {
+            quickAdd.showCritical(critical)
+            // The section appearing or emptying makes this view a different
+            // height, and only the popover can resize — without this, a
+            // critical task that arrives while the box is open is drawn
+            // outside it.
+            sizePopover()
+        }
+    }
+
+    // MARK: - Unread notifications
+
+    /// Every two minutes.
+    ///
+    /// Polled rather than pushed, and that is the web app's own decision
+    /// rather than a shortcut — its note reads "it's a counter. A second
+    /// realtime channel just to keep a number current isn't worth the
+    /// reconnect handling." The web polls it every minute while a tab is
+    /// open; this runs all day in a menu bar, so it is slower, and it also
+    /// recounts whenever the socket nudges, the machine wakes, or the
+    /// popover opens — the three moments somebody is about to look.
+    private func startWatchingUnread() {
+        unreadTimer = Timer.scheduledTimer(withTimeInterval: 120, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.refreshUnread() }
+        }
+        Task { await refreshUnread() }
+    }
+
+    @MainActor
+    private func refreshUnread() async {
+        guard Settings.isConfigured else {
+            unread = 0
+            updateIcon()
+            return
+        }
+        do {
+            unread = try await MCPClient.fromSettings().unreadNotifications()
+        } catch {
+            // Left as it was, the same rule the critical poll follows: "we
+            // couldn't check" and "nothing is waiting" are different answers
+            // and only one of them is safe to draw as a clear icon.
+            //
+            // This is also the path an installation older than the
+            // `notifications` tool takes — it answers "unknown tool", which
+            // arrives here as an error, and the badge simply never appears
+            // rather than the app looking broken.
+            return
+        }
+        updateIcon()
+    }
+
+    // MARK: - The running timer
+
+    /// Every five minutes, plus the socket, the wake, and the popover.
+    ///
+    /// Slower than the unread poll and faster than the critical one, which is
+    /// roughly how often the answer changes: a timer is started and stopped a
+    /// handful of times a day. The three event-driven moments above are what
+    /// actually keep it current — and one of them, the socket, only sees the
+    /// watched organisation, which is why this exists at all. There is one
+    /// running timer per person across the whole installation, so a timer
+    /// started in another organisation is still yours and still running.
+    private func startWatchingTimer() {
+        timingTimer = Timer.scheduledTimer(withTimeInterval: 300, repeats: true) { [weak self] _ in
+            guard let self = self else { return }
+            Task { await self.refreshTiming() }
+        }
+        Task { await refreshTiming() }
+    }
+
+    @MainActor
+    private func refreshTiming() async {
+        guard Settings.isConnected else {
+            timing = nil
+            updateIcon()
+            return
+        }
+        do {
+            timing = try await MCPClient.fromSettings().runningTimer()
+        } catch {
+            // Left as it was, the same rule the other two polls follow: "we
+            // couldn't ask" is not "nothing is running", and only one of
+            // those is safe to draw as a clear icon.
+            //
+            // This is also the path an installation older than the
+            // `running_timer` tool takes — it answers "unknown tool", which
+            // arrives here as an error, so the pip simply never appears
+            // rather than the app looking broken. Starting a timer still
+            // works there; only the indicator is missing.
+            return
+        }
+        updateIcon()
+        if popover.isShown {
+            quickAdd.showTiming(timing)
+            // Same reason as the critical section above: a timer that starts
+            // while the box is open adds a row to it.
+            sizePopover()
+        }
+    }
+
+    /// Stop it, from the popover's row.
+    ///
+    /// Optimistic about nothing: the indicator is cleared from the answer,
+    /// not from the click. A Stop that failed and left the icon clear would
+    /// leave a clock running with nothing on screen admitting to it, which is
+    /// the exact failure the indicator exists to prevent.
+    private func stopTiming() {
+        Task { @MainActor in
+            do {
+                try await MCPClient.fromSettings().stopTimer()
+                timing = nil
+                updateIcon()
+                quickAdd.showTiming(nil)
+                sizePopover()
+            } catch {
+                quickAdd.report(error.localizedDescription, isError: true)
+            }
+            quickAdd.timerStopFinished()
+        }
     }
 
     // MARK: - The global hotkey

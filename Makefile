@@ -10,7 +10,7 @@ APP     = AyeAye.app
 BINARY  = .build/release/AyeAyeMenuBar
 DEST    = $(APP)/Contents/MacOS/AyeAyeMenuBar
 
-.PHONY: all build app install run check clean
+.PHONY: all build app install run check check-create clean
 
 all: app
 
@@ -55,6 +55,26 @@ run: app
 check:
 	@swiftc Sources/AyeAyeMenuBar/EditMenu.swift Tests/PasteCheck/main.swift -o .build/pastecheck
 	@./.build/pastecheck
+
+# The other one: that a task with every optional field filled in arrives
+# with every optional field filled in, that the box's other mode — a spark —
+# is accepted and refused with a readable reason when it is empty, and that a
+# timer can be started, read back and stopped.
+#
+# Separate from `check` because it needs a real installation and a write
+# token, which it takes from the environment — the same three variables the
+# scripted `--create` mode reads, so a dev stack costs nothing to point it at:
+#
+#   AYEAYE_SERVER=http://localhost AYEAYE_TOKEN=ayc_… AYEAYE_ORG=<uuid> make check-create
+#
+# Without them it skips — all but the pure parsing checks, which run either
+# way. What it is really pinning is the parsing: most of this app's calls read
+# prose written for a language model, and prose is a contract no compiler
+# checks.
+check-create:
+	@swiftc Sources/AyeAyeMenuBar/MCPClient.swift Sources/AyeAyeMenuBar/Settings.swift \
+		Tests/CreateCheck/main.swift -o .build/createcheck
+	@./.build/createcheck
 
 clean:
 	rm -rf .build $(APP)

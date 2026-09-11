@@ -24,20 +24,33 @@ enum MCPError: LocalizedError {
 }
 
 /// A very small MCP client: one method, `call`, over the streamable-HTTP
-/// transport.
+/// transport, and a handful of calls built on it.
 ///
 /// This talks to `/mcp` rather than to the REST API for a reason worth
 /// keeping written down: the REST API authenticates with a SuperTokens
 /// session cookie, which a native app has no way to obtain without
 /// embedding a browser and a sign-in flow. `/mcp` accepts a personal access
 /// token — the ones minted on the account screen, scoped read or write,
-/// revocable from the same screen — so this app needs no server-side change
-/// at all to exist.
+/// revocable from the same screen — so a menu bar app can exist against an
+/// unmodified installation.
 ///
 /// It is also **stateless** on purpose (see the server's own notes): there
 /// is no `initialize` handshake to do and no session id to carry, so one
-/// POST is a complete interaction. That is the whole reason this file is
-/// eighty lines rather than a protocol implementation.
+/// POST is a complete interaction. That is the whole reason this file is a
+/// couple of hundred lines rather than a protocol implementation.
+///
+/// **Some of the calls below are newer than the server's first version of
+/// this endpoint.** `list_projects` and `list_members` were added to ayeaye
+/// for the Details panel: every write tool names a project by id and a
+/// person by email, which is right for an assistant repeating back an id it
+/// was handed and useless to a menu that has to offer the choice. Against an
+/// installation predating them the two menus say "couldn't load" and
+/// everything else still works. `create_spark` was added for the box's
+/// second mode, and against an older server it is refused by name — which
+/// is the right answer, because there is nowhere for a spark to go.
+/// `running_timer` was added for the timer indicator on the icon: the
+/// endpoint already had `start_timer` and `stop_timer`, and nothing that
+/// could ask what was running.
 struct MCPClient {
     let baseURL: String
     let token: String
@@ -106,23 +119,68 @@ struct MCPClient {
         // can't see, would otherwise look like a success with an apologetic
         // sentence in it.
         if result["isError"] as? Bool == true {
-            // The server's own MCP SDK loses a refusal's message on the way
-            // out and sends the bare wrapper "Error executing tool <name>",
-            // with no reason attached — a known issue on that side, not
-            // something this client can recover. Relaying it verbatim would
-            // put a string in front of somebody that tells them nothing at
-            // all, so it is replaced with the thing that is actually worth
-            // checking. Any refusal that *does* carry a message keeps it.
-            if text.isEmpty || text.hasPrefix("Error executing tool") {
-                throw MCPError.rpc(
-                    "The server refused it. If your token is read-only, make a write one.")
-            }
-            throw MCPError.rpc(text)
+            throw MCPError.rpc(refusal(from: text))
         }
         return text
     }
 
-    // MARK: - The two calls this app actually makes
+    /// What to show somebody when the server turns a call down.
+    ///
+    /// A refusal arrives wrapped: the MCP SDK prefixes the tool's own message
+    /// with `Error executing tool <name>: `. The message after the colon is
+    /// the useful half — "no such organisation", "nobody@example.com is not a
+    /// member of that organisation", "this credential is read-only" — so the
+    /// wrapper is dropped and the sentence kept.
+    ///
+    /// **The fallback is for an older server.** The wrapper used to arrive
+    /// with nothing after it at all, because the server raised refusals as
+    /// plain exceptions and the SDK withholds a crash's text on purpose;
+    /// that is fixed there now (`class Denied(ToolError)`), but an app on a
+    /// laptop outlives the version of the server it was built against, and a
+    /// bare "Error executing tool create_task" in front of somebody says
+    /// nothing they can act on. So it is replaced with the thing actually
+    /// worth checking.
+    static func refusal(from text: String) -> String {
+        let generic = "The server refused it. If your token is read-only, make a write one."
+        guard text.hasPrefix("Error executing tool") else {
+            return text.isEmpty ? generic : text
+        }
+        guard let colon = text.firstIndex(of: ":") else { return generic }
+        let message = text[text.index(after: colon)...]
+            .trimmingCharacters(in: .whitespacesAndNewlines)
+        return message.isEmpty ? generic : message
+    }
+
+    // MARK: - Creating a task
+
+    /// Everything the box can say about a task. All of it optional except the
+    /// title, which is the only thing quick capture actually requires — the
+    /// rest is there for the times you already know where the thought
+    /// belongs, and absent the rest of the time.
+    struct Draft {
+        var title: String
+        var description: String?
+        var projectID: String?
+        /// `nil` means don't send it, and the server's own default (`normal`)
+        /// applies. Deliberately not sending "normal" explicitly: the default
+        /// belongs to the server, and duplicating it here is a second place
+        /// for it to be wrong.
+        var priority: String?
+        var actionRequiredEmail: String?
+        /// Your own planner board, not the owner's — see the server's note on
+        /// `planner_bucket`.
+        var plannerBucket: String?
+        /// Whether to start timing it once it exists.
+        ///
+        /// **Not sent to `create_task`** — there is no such argument, and
+        /// there shouldn't be: a timer is a record of what you did, not a
+        /// property of the work. It is a second call, `start_timer`, made
+        /// with the id the create answered with. This flag rides in the draft
+        /// because the box collected it alongside everything else, and the
+        /// alternative was a second parameter threaded through the same three
+        /// callbacks.
+        var startTimer: Bool = false
+    }
 
     /// Returns the new task's id, so it can be opened afterwards.
     ///
@@ -131,12 +189,100 @@ struct MCPClient {
     /// `organisations` below: mildly ugly here, and much better than a
     /// second endpoint on the server existing only for this app.
     @discardableResult
-    func createTask(title: String, organisationID: String) async throws -> String? {
-        let answer = try await call(tool: "create_task", arguments: [
+    func createTask(_ draft: Draft, organisationID: String) async throws -> String? {
+        var arguments: [String: Any] = [
             "organisation_id": organisationID,
-            "title": title,
-        ])
+            "title": draft.title,
+        ]
+        // Omitted, not sent empty. `update_task` reads an empty string as
+        // "clear this field"; `create_task` has nothing to clear, but sending
+        // one anyway would mean this app relies on the two agreeing forever.
+        if let value = draft.description, !value.isEmpty { arguments["description"] = value }
+        if let value = draft.projectID { arguments["project_id"] = value }
+        if let value = draft.priority { arguments["priority"] = value }
+        if let value = draft.actionRequiredEmail { arguments["action_required_email"] = value }
+        if let value = draft.plannerBucket { arguments["planner_bucket"] = value }
+        let answer = try await call(tool: "create_task", arguments: arguments)
         return Self.firstBracketedID(in: answer)
+    }
+
+    // MARK: - Capturing a spark
+
+    /// The other thing this box can file: a stray thought that is not work
+    /// yet. One field, and **no organisation** — a spark carries no
+    /// `organisation_id` at all on the server, deliberately, because the
+    /// point of catching a thought is that it arrives while you are looking
+    /// at something else and possibly at some other organisation entirely.
+    ///
+    /// `create_spark` is newer than this app's first version of the Details
+    /// panel and was added to ayeaye for it; against an installation that
+    /// predates it the call is refused by name and the box says so.
+    ///
+    /// The id comes back for the same reason `createTask`'s does — the
+    /// answer is prose, and parsing it is the only check that its shape is
+    /// still what this app thinks it is — but nothing opens it: the web app
+    /// has one Sparks screen and no route to a single spark.
+    @discardableResult
+    func createSpark(body: String) async throws -> String? {
+        let answer = try await call(tool: "create_spark", arguments: ["body": body])
+        return Self.firstBracketedID(in: answer)
+    }
+
+    /// The Sparks screen. Not under `orgs/:orgId` like a task, because a
+    /// spark isn't in an organisation — it sits at the bare root next to
+    /// the inbox, which is the SPA's own route for it.
+    static func sparksURL(base: String) -> URL? {
+        var trimmed = base.trimmingCharacters(in: .whitespaces)
+        while trimmed.hasSuffix("/") { trimmed.removeLast() }
+        return URL(string: trimmed + "/sparks")
+    }
+
+    // MARK: - The lists behind the pickers
+
+    struct Project {
+        let id: String
+        let name: String
+    }
+
+    /// The projects you can file into. Yours, not the organisation's — a
+    /// project is private to its owner until it is shared, and the server
+    /// resolves that; this list is whatever it hands back.
+    ///
+    /// Archived ones are left out. They are still valid targets as far as the
+    /// server is concerned, and a menu of finished work to file new work into
+    /// is a longer menu that is wrong more often.
+    func projects(organisationID: String) async throws -> [Project] {
+        let text = try await call(tool: "list_projects", arguments: [
+            "organisation_id": organisationID,
+        ])
+        return text.split(separator: "\n").compactMap { line in
+            // `[id] | Name | access=owner`, with `| archived` when it is.
+            guard line.hasPrefix("["), let id = Self.firstBracketedID(in: line) else { return nil }
+            let fields = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count > 1, !fields.contains("archived") else { return nil }
+            return Project(id: id, name: fields[1])
+        }
+    }
+
+    struct Member {
+        let email: String
+        let name: String
+        let isYou: Bool
+    }
+
+    /// Who can be asked to act. Emails, because that is what `create_task`
+    /// takes — it names people the way a person says them out loud rather
+    /// than by id.
+    func members(organisationID: String) async throws -> [Member] {
+        let text = try await call(tool: "list_members", arguments: [
+            "organisation_id": organisationID,
+        ])
+        return text.split(separator: "\n").compactMap { line in
+            // `email | Display Name | role=member`, plus `| you` for yourself.
+            let fields = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+            guard fields.count > 1, fields[0].contains("@") else { return nil }
+            return Member(email: fields[0], name: fields[1], isYou: fields.contains("you"))
+        }
     }
 
     static func firstBracketedID<S: StringProtocol>(in line: S) -> String? {
@@ -175,6 +321,126 @@ struct MCPClient {
             guard fields.count > 1 else { return nil }
             return TaskSummary(id: id, title: fields[1])
         }
+    }
+
+    /// How many notifications you have not read, across every organisation.
+    ///
+    /// **Not scoped to the selected organisation, unlike everything else this
+    /// app shows.** It is the same number as the bell in the web app, and a
+    /// badge that disagreed with the bell would be a second, quieter answer
+    /// to the same question — you would click through to find out which one
+    /// was lying.
+    ///
+    /// The tool leads with the count on its own line (`3 unread:`) precisely
+    /// so a caller that only wants the number doesn't have to count rows.
+    func unreadNotifications() async throws -> Int {
+        let text = try await call(tool: "notifications", arguments: ["limit": 1])
+        guard let first = text.split(separator: "\n").first else { return 0 }
+        let digits = first.prefix { $0.isNumber }
+        guard let count = Int(digits) else { throw MCPError.malformed("that unread count") }
+        return count
+    }
+
+    // MARK: - The timer
+
+    /// What you are timing, if anything.
+    ///
+    /// **Not scoped to the selected organisation**, for the same reason the
+    /// unread count isn't: there is one running timer per person across the
+    /// whole installation — a partial unique index on the server, not a
+    /// convention — so a timer left going in another organisation is still
+    /// yours and still running, and an icon that went quiet when you switched
+    /// would be hiding exactly the thing it exists to show.
+    ///
+    /// `running_timer` was added to ayeaye for this, the same way
+    /// `list_projects` and `create_spark` were. `start_timer` and
+    /// `stop_timer` were already there; nothing could ask what was running.
+    /// Against an installation predating it the call is refused by name,
+    /// which arrives here as an error — and the caller leaves the indicator
+    /// alone rather than showing a timer that isn't there.
+    struct RunningTimer {
+        let taskID: String
+        let title: String
+        let organisationID: String
+        /// When it started, so elapsed time can be recomputed locally rather
+        /// than asked for again. The server sends `elapsed=1h 30m` as well,
+        /// and that is what this falls back to when the timestamp can't be
+        /// read — a formatted string is a fine thing to show once and a
+        /// useless thing to keep, since it is wrong a minute later.
+        let startedAt: Date?
+        let elapsed: String
+    }
+
+    /// `nil` for "nothing is running", which is an answer rather than a
+    /// failure — a failure throws, and the difference matters upstream: one
+    /// clears the indicator and the other must leave it alone.
+    func runningTimer() async throws -> RunningTimer? {
+        let text = try await call(tool: "running_timer", arguments: [:])
+        // `[task-id] | Title | organisation_id=… | elapsed=… | started=…`,
+        // or "Nothing is running." — which has no bracket, so the same test
+        // every other parse here uses distinguishes them.
+        guard let line = text.split(separator: "\n").first(where: { $0.hasPrefix("[") }),
+              let id = Self.firstBracketedID(in: line)
+        else { return nil }
+        let fields = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
+        guard fields.count > 2 else { throw MCPError.malformed("that timer") }
+        func value(_ key: String) -> String? {
+            fields.first { $0.hasPrefix(key + "=") }
+                .map { String($0.dropFirst(key.count + 1)) }
+        }
+        guard let org = value("organisation_id"), !org.isEmpty else {
+            // A timer with no organisation is one this app cannot open or
+            // place, which is worse than not knowing about it.
+            throw MCPError.malformed("that timer's organisation")
+        }
+        return RunningTimer(
+            taskID: id, title: fields[1], organisationID: org,
+            startedAt: value("started").flatMap(Self.date(from:)),
+            elapsed: value("elapsed") ?? "")
+    }
+
+    /// The server's `started=` is an ISO-8601 timestamp from Python's
+    /// `datetime.isoformat()`, which writes fractional seconds when it has
+    /// them and leaves them out when it doesn't — so both shapes have to
+    /// parse, and `ISO8601DateFormatter` takes one set of options at a time.
+    static func date(from iso: String) -> Date? {
+        let formatter = ISO8601DateFormatter()
+        for options in [
+            [.withInternetDateTime, .withFractionalSeconds] as ISO8601DateFormatter.Options,
+            [.withInternetDateTime],
+        ] {
+            formatter.formatOptions = options
+            if let date = formatter.date(from: iso) { return date }
+        }
+        return nil
+    }
+
+    /// Start timing a task. Returns the title of whatever it displaced, if it
+    /// displaced anything.
+    ///
+    /// Starting stops whatever was already running — the server's own rule,
+    /// not this app's, and the right one: switching tasks is the commonest
+    /// thing anybody does with a tracker. It says so in its answer
+    /// (`Timer started on [id] (stopped the one running on [id])`), and the
+    /// id of the displaced task is worth passing back up so the box can
+    /// mention it rather than swallowing it.
+    @discardableResult
+    func startTimer(taskID: String, organisationID: String) async throws -> String? {
+        let answer = try await call(tool: "start_timer", arguments: [
+            "organisation_id": organisationID,
+            "task_id": taskID,
+        ])
+        // The second bracketed id, when there is one. Deliberately read off
+        // the phrase rather than by counting brackets: an answer that only
+        // ever has one id must not be misread as having displaced something.
+        guard let phrase = answer.range(of: "stopped the one running on ") else { return nil }
+        return Self.firstBracketedID(in: answer[phrase.upperBound...])
+    }
+
+    /// Stop whatever is running. Idempotent on the server — nothing running
+    /// is not an error there, and so isn't one here.
+    func stopTimer() async throws {
+        _ = try await call(tool: "stop_timer", arguments: [:])
     }
 
     /// Where a task lives in the web app. The SPA's own route, which is the

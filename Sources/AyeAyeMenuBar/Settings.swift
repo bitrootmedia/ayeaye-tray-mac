@@ -15,6 +15,8 @@ enum Settings {
     private static let baseURLKey = "baseURL"
     private static let orgIDKey = "organisationID"
     private static let orgNameKey = "organisationName"
+    private static let detailsKey = "detailsExpanded"
+    private static let sparkKey = "capturesSparks"
 
     /// The environment wins over anything stored, for all three settings.
     ///
@@ -53,10 +55,47 @@ enum Settings {
         set { UserDefaults.standard.set(newValue, forKey: orgNameKey) }
     }
 
-    static var isConfigured: Bool {
+    /// Whether the popover opens with the extra fields showing.
+    ///
+    /// The *values* in them are deliberately not remembered — a box that
+    /// quietly files your next thought into last week's project is worse than
+    /// one that asks again — but whether you want to see them at all is a
+    /// preference, not a value, and re-opening the same panel every time is
+    /// the kind of small tax that makes people stop using the extra fields.
+    static var detailsExpanded: Bool {
+        get { UserDefaults.standard.bool(forKey: detailsKey) }
+        set { UserDefaults.standard.set(newValue, forKey: detailsKey) }
+    }
+
+    /// Whether the box files a spark rather than a task.
+    ///
+    /// Remembered, unlike anything in the Details panel — and the difference
+    /// is that this one is never quiet. The panel's *values* are hidden the
+    /// moment it is closed, which is why applying last week's project to
+    /// today's thought would be a thing done behind your back; the mode is
+    /// spelled out three times on a box you are looking at (the picker, the
+    /// placeholder in the field, and the hint beside it). Somebody who
+    /// mostly captures sparks shouldn't have to say so every time.
+    static var capturesSparks: Bool {
+        get { UserDefaults.standard.bool(forKey: sparkKey) }
+        set { UserDefaults.standard.set(newValue, forKey: sparkKey) }
+    }
+
+    /// Enough to reach the server as you: an address and a token.
+    ///
+    /// Which is the whole bar for a spark, because a spark has no
+    /// organisation — the server's own record carries no `organisation_id`,
+    /// so somebody who has been invited nowhere yet can still capture one.
+    static var isConnected: Bool {
         guard let base = baseURL, !base.isEmpty else { return false }
-        guard let org = organisationID, !org.isEmpty else { return false }
         return token != nil
+    }
+
+    /// The above, plus somewhere for a task to go.
+    static var isConfigured: Bool {
+        guard isConnected else { return false }
+        guard let org = organisationID, !org.isEmpty else { return false }
+        return true
     }
 
     // MARK: - The token

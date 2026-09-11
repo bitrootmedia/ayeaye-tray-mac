@@ -1,10 +1,10 @@
 import AppKit
 
-/// Two ways in.
+/// Three ways in.
 ///
-/// `--create "some title"` runs the whole network path — settings, keychain,
-/// MCP call — with no window, no menu bar item and no event loop, and prints
-/// what happened. That exists because everything that can actually be wrong
+/// `--create "some title"` (and `--spark "some thought"`, its one-field
+/// twin) runs the whole network path — settings, keychain, MCP call — with
+/// no window, no menu bar item and no event loop, and prints what happened. That exists because everything that can actually be wrong
 /// with this app (a bad address, a refused token, an organisation you were
 /// removed from) is wrong in that path, and a menu bar popover is the single
 /// worst place to debug it from. It is also the only way to test this
@@ -83,8 +83,43 @@ if arguments.first == "--create" {
         do {
             let client = try MCPClient.fromSettings()
             guard let org = Settings.organisationID else { throw MCPError.notConfigured }
-            let id = try await client.createTask(title: title, organisationID: org)
+            // Title only. The popover's other fields are pickers over lists
+            // fetched from the server, and a shell already has better tools
+            // for "the project whose name is X" than a flag on this would be
+            // — the MCP endpoint itself, which is what the assistant uses.
+            let id = try await client.createTask(
+                MCPClient.Draft(title: title), organisationID: org)
             print(id.map { "Created \($0): \(title)" } ?? "Created: \(title)")
+        } catch {
+            FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
+            outcome.status = 1
+        }
+        semaphore.signal()
+    }
+    semaphore.wait()
+    exit(outcome.status)
+}
+
+/// `--spark "some thought"`, the other thing the box can file.
+///
+/// No organisation, and it doesn't read one: a spark carries none on the
+/// server, so this works on a machine that has an address and a token and
+/// nothing else configured — which is also the shortest possible smoke test
+/// that the credential works at all.
+if arguments.first == "--spark" {
+    let body = arguments.dropFirst().joined(separator: " ")
+    guard !body.isEmpty else {
+        FileHandle.standardError.write(Data("usage: AyeAyeMenuBar --spark \"a thought\"\n".utf8))
+        exit(2)
+    }
+    final class Outcome { var status: Int32 = 0 }
+    let outcome = Outcome()
+    let semaphore = DispatchSemaphore(value: 0)
+    Task {
+        do {
+            let client = try MCPClient.fromSettings()
+            let id = try await client.createSpark(body: body)
+            print(id.map { "Saved \($0): \(body)" } ?? "Saved: \(body)")
         } catch {
             FileHandle.standardError.write(Data((error.localizedDescription + "\n").utf8))
             outcome.status = 1
