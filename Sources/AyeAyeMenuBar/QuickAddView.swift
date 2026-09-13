@@ -113,6 +113,15 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     private let modePicker = NSSegmentedControl()
     private let field = NSTextField()
     private let orgButton = NSButton()
+    /// The instance itself, as a globe beside the organisation name.
+    ///
+    /// This box otherwise only links to things that have *happened* — the
+    /// task you just filed, a critical one, the one being timed — and there
+    /// was no way to simply go and look at the installation the app is
+    /// pointed at. An icon rather than words because the address is already
+    /// spelled out in the tooltip and in Settings, and the footer is the
+    /// one row here that has to stay quiet.
+    private let instanceButton = NSButton()
     /// Takes the organisation button's place in spark mode, where naming an
     /// organisation would be a lie about where the thing is going.
     private let sparkNote = NSTextField(labelWithString: "Yours alone, any organisation")
@@ -128,6 +137,13 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     private let criticalSection = NSStackView()
     private let criticalHeading = NSTextField(labelWithString: "")
     private let criticalList = NSStackView()
+    /// The Planner tab's whole content: a heading per bucket and a row per
+    /// task, built fresh each time an answer arrives.
+    ///
+    /// It takes the text field's place rather than sitting under it — this
+    /// is the one mode that files nothing, so leaving an empty box above a
+    /// list would be inviting a Return that has nowhere to go.
+    private let plannerSection = NSStackView()
     /// The same shape as the critical section, one row below it: hidden when
     /// nothing is being timed, and naming the one task when something is.
     private let timerSection = NSStackView()
@@ -166,6 +182,9 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         /// The Sparks screen. There is no route to a single spark — the list
         /// is the screen — so this carries nothing.
         case sparks
+        /// The installation's own front page — `Settings.baseURL` and
+        /// nothing after it.
+        case instance
     }
 
     /// Called with the whole draft. Returns when the task exists.
@@ -179,6 +198,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     var onOpen: ((Destination) -> Void)?
     /// The Details panel was opened and its menus have nothing in them yet.
     var onNeedsLists: (() -> Void)?
+    /// The Planner tab is showing and wants today's and tomorrow's work.
+    var onNeedsPlanner: (() -> Void)?
     /// The view is a different height now, and only the popover can resize.
     var onResize: (() -> Void)?
     /// The Stop button on the timing row was clicked.
@@ -219,16 +240,24 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         // Labels, not icons: "Task" and "Spark" are the words the web app
         // uses for the two things, and a 16pt glyph for "a thought you have
         // not decided anything about yet" does not exist.
-        modePicker.segmentCount = 2
+        modePicker.segmentCount = 3
         modePicker.setLabel("Task", forSegment: 0)
         modePicker.setLabel("Spark", forSegment: 1)
+        // The third is not a third kind of thing to file — it is the one tab
+        // that reads rather than writes. It sits in the same control anyway
+        // because it is the same question answered a different way ("what am
+        // I doing?"), and a separate control for one button would be a second
+        // row of chrome above a box whose whole argument is that it is small.
+        modePicker.setLabel("Planner", forSegment: 2)
         modePicker.trackingMode = .selectOne
         modePicker.controlSize = .small
         modePicker.font = .systemFont(ofSize: 11)
         modePicker.selectedSegment = Settings.capturesSparks ? 1 : 0
         modePicker.target = self
         modePicker.action = #selector(modeChanged)
-        modePicker.toolTip = "What ⏎ files: a task, or a spark only you ever see (⌘J)"
+        modePicker.toolTip =
+            "What ⏎ files: a task, or a spark only you ever see (⌘J) — "
+            + "or today's and tomorrow's planner"
         modePicker.setContentHuggingPriority(.required, for: .horizontal)
 
         field.placeholderString = "New task…"
@@ -251,6 +280,21 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         orgButton.target = self
         orgButton.action = #selector(pickOrganisation)
         orgButton.setContentCompressionResistancePriority(.defaultLow, for: .horizontal)
+
+        // Borderless and secondary, like the organisation button next to it:
+        // it is a way out of the box, not one of the two things the box is
+        // for, and a bordered button here would read as a third action
+        // competing with Return.
+        instanceButton.bezelStyle = .inline
+        instanceButton.isBordered = false
+        instanceButton.image = NSImage(
+            systemSymbolName: "globe", accessibilityDescription: "Open in the browser")
+        instanceButton.symbolConfiguration = .init(pointSize: 11, weight: .regular)
+        instanceButton.contentTintColor = .secondaryLabelColor
+        instanceButton.imagePosition = .imageOnly
+        instanceButton.target = self
+        instanceButton.action = #selector(openInstance)
+        instanceButton.setContentHuggingPriority(.required, for: .horizontal)
 
         sparkNote.font = .systemFont(ofSize: 11)
         sparkNote.textColor = .secondaryLabelColor
@@ -308,7 +352,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         // `orgButton` and `sparkNote` swap places with the mode — an
         // `NSStackView` collapses a hidden arranged view rather than leaving
         // a hole where it was.
-        let footer = NSStackView(views: [orgButton, sparkNote, spinner, statusLabel])
+        let footer = NSStackView(
+            views: [orgButton, instanceButton, sparkNote, spinner, statusLabel])
         footer.orientation = .horizontal
         footer.spacing = 6
 
@@ -342,6 +387,14 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         criticalSection.spacing = 6
         criticalSection.alignment = .leading
         criticalSection.isHidden = true
+
+        // No heading of its own and no separator: the tab *is* the heading,
+        // and this is the whole body of the box while it is showing rather
+        // than a footnote under something else.
+        plannerSection.orientation = .vertical
+        plannerSection.spacing = 8
+        plannerSection.alignment = .leading
+        plannerSection.isHidden = true
 
         // The running timer, built like the critical section above it and for
         // the same reason: it is the other thing this box reports rather than
@@ -397,7 +450,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
 
         let stack = NSStackView(
             views: [
-                modePicker, field, confirmation, detailsToggle, details, footer,
+                modePicker, field, confirmation, plannerSection, detailsToggle, details, footer,
                 criticalSection, timerSection,
             ])
         stack.orientation = .vertical
@@ -422,6 +475,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
             confirmation.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             details.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            plannerSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             criticalSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             rule.widthAnchor.constraint(equalTo: criticalSection.widthAnchor),
             timerSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
@@ -574,11 +628,24 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// can change while this view is alive, and a stale label would be a
     /// quiet lie about where the next task is going.
     func refresh() {
+        // The box opens ready to type, never onto the list it was last
+        // showing — see `isPlannerMode` for why that one isn't remembered.
+        if isPlannerMode { modePicker.selectedSegment = Settings.capturesSparks ? 1 : 0 }
         clearConfirmation()
         orgButton.title = Settings.isConfigured
             ? (Settings.organisationName ?? "Unknown organisation")
             : "Not set up"
         orgButton.isEnabled = Settings.isConfigured
+        // Gone rather than disabled when there is no address yet: the footer
+        // already says "Not set up", and a globe that opens nothing is a
+        // second, worse answer to the same question.
+        if let base = Settings.baseURL, let url = MCPClient.homeURL(base: base) {
+            instanceButton.isHidden = false
+            instanceButton.toolTip = "Open \(url.host ?? url.absoluteString) in the browser"
+        } else {
+            instanceButton.isHidden = true
+            instanceButton.toolTip = nil
+        }
         field.stringValue = ""
         clearDetails()
         applyMode()
@@ -589,12 +656,27 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
 
     var isSparkMode: Bool { modePicker.selectedSegment == 1 }
 
+    /// The read-only tab. Not a capture mode, and deliberately not
+    /// remembered the way Task and Spark are: `Settings.capturesSparks` is
+    /// the answer to "what does Return file", and a box that opened onto a
+    /// list because you last looked at one would have quietly stopped being
+    /// a keystroke, a sentence and Return. `refresh` puts it back.
+    var isPlannerMode: Bool { modePicker.selectedSegment == 2 }
+
     /// Set from outside — the right-click menu offers both by name, and
     /// picking one there has to arrive here before the box is shown.
     func setSparkMode(_ on: Bool) {
         modePicker.selectedSegment = on ? 1 : 0
         Settings.capturesSparks = on
         applyMode()
+    }
+
+    /// Show the Planner tab, from outside — the right-click menu offers it by
+    /// name alongside the two capture modes.
+    func setPlannerMode() {
+        modePicker.selectedSegment = 2
+        applyMode()
+        onNeedsPlanner?()
     }
 
     /// Everything that differs between a task and a spark, in one place.
@@ -612,24 +694,41 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// as it was.
     private func applyMode() {
         let spark = isSparkMode
+        let planner = isPlannerMode
         // A spark needs no organisation, so the bar for it is lower — the
         // server's own record has no organisation_id at all, and somebody
         // who has been invited nowhere yet can still capture one.
         let ready = spark ? Settings.isConnected : Settings.isConfigured
-        let confirming = !confirmation.isHidden
+        let confirming = !confirmation.isHidden && !planner
 
         field.placeholderString = spark ? "New spark…" : "New task…"
         field.isEnabled = ready
+        // The field and the confirmation both go: the Planner tab replaces
+        // the whole writing half of the box rather than sitting under it.
+        field.isHidden = planner
+        confirmation.isHidden = !confirming
+        plannerSection.isHidden = !planner
         modePicker.isEnabled = Settings.isConnected
+        // The organisation still names where this list comes from — a planner
+        // is read one organisation at a time, same as everything else here —
+        // so the button stays, and switching from it reloads the tab.
         orgButton.isHidden = spark
-        sparkNote.isHidden = !spark
-        detailsToggle.isHidden = spark || confirming
+        sparkNote.isHidden = !spark || planner
+        detailsToggle.isHidden = spark || planner || confirming
         detailsToggle.isEnabled = Settings.isConfigured
-        details.isHidden = spark || confirming || !Settings.detailsExpanded
+        details.isHidden = spark || planner || confirming || !Settings.detailsExpanded
         updateDetailsToggle()
         // Not while the confirmation is up: that owns this line, in green,
         // and it has to outlive anything else touching the box.
         guard !confirming else { return }
+        if planner {
+            // Whatever the tab last said about itself — "Loading…", a count,
+            // or why there is nothing to show. Set by `showPlanner`, and left
+            // alone here so switching away and back doesn't blank it.
+            statusLabel.textColor = plannerFailed ? .systemRed : .secondaryLabelColor
+            statusLabel.stringValue = plannerStatus
+            return
+        }
         statusLabel.stringValue = ready
             ? (spark ? "⏎ to capture" : "⏎ to create")
             : "Open Settings…"
@@ -641,10 +740,23 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     }
 
     @objc private func modeChanged() {
-        Settings.capturesSparks = isSparkMode
+        // Only the two capture modes are remembered — see `isPlannerMode`.
+        if !isPlannerMode { Settings.capturesSparks = isSparkMode }
+        if isPlannerMode {
+            // A green tick about the task you just filed is about the writing
+            // half of the box, and the writing half has just gone away.
+            createdDestination = nil
+            confirmation.isHidden = true
+            plannerStatus = "Loading…"
+            plannerFailed = false
+        }
         applyMode()
         onResize?()
-        window?.makeFirstResponder(field)
+        // Nothing to type into on the Planner tab, and handing first
+        // responder to a hidden field is how a popover stops answering
+        // Escape.
+        window?.makeFirstResponder(isPlannerMode ? self : field)
+        if isPlannerMode { onNeedsPlanner?() }
         // Coming back to Task with the panel already open: its menus may
         // never have been fetched, since the panel was closed the whole time
         // the box was in the other mode.
@@ -740,7 +852,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         // a popover, and anybody with more than five critical tasks has a
         // problem this list can't help with anyway.
         for task in tasks.prefix(5) {
-            let row = NSButton(title: task.title, target: self, action: #selector(openCritical(_:)))
+            let row = NSButton(title: task.title, target: self, action: #selector(openTaskRow(_:)))
             row.bezelStyle = .inline
             row.isBordered = false
             row.font = .systemFont(ofSize: 12)
@@ -756,6 +868,106 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
             more.textColor = .secondaryLabelColor
             criticalList.addView(more, in: .leading)
         }
+    }
+
+    // MARK: - The planner
+
+    /// What the footer says while the Planner tab is up. Kept here rather
+    /// than read back off the label so switching tabs and back doesn't have
+    /// to re-ask the server to know what to write.
+    private var plannerStatus = "Loading…"
+    private var plannerFailed = false
+
+    /// The two buckets this tab shows, in the server's own order.
+    ///
+    /// Today and Tomorrow and no further, which is the whole of the feature
+    /// as asked for and is also the honest limit of a menu bar popover: This
+    /// week, Next week and Someday are a board to arrange, not a list to
+    /// glance at, and the web app is where you drag things between them.
+    private static let plannerBuckets: [(String, String)] = [
+        ("today", "Today"),
+        ("tomorrow", "Tomorrow"),
+    ]
+
+    /// The buckets to ask the server for — the same two, as the tool spells
+    /// them.
+    static var plannerBucketNames: [String] { plannerBuckets.map { $0.0 } }
+
+    /// `nil` means the ask failed, and `reason` says why. An empty array is
+    /// the other answer entirely: nothing is planned, which is a fact about
+    /// your week rather than about the network.
+    func showPlanner(_ buckets: [MCPClient.PlannerBucket]?, reason: String? = nil) {
+        plannerSection.setViews([], in: .leading)
+        guard let buckets = buckets else {
+            plannerFailed = true
+            // The tool is newer than the rest of this app's reads, so the
+            // likeliest failure here is an installation that simply doesn't
+            // have it — and the server's own refusal names it, which is more
+            // use than anything this app could guess.
+            plannerStatus = reason ?? "Couldn't load your planner"
+            plannerSection.addView(
+                Self.plannerNote("Nothing to show — the server couldn't be asked."),
+                in: .leading)
+            if isPlannerMode { applyMode() }
+            onResize?()
+            return
+        }
+        plannerFailed = false
+        let total = buckets.reduce(0) { $0 + $1.tasks.count }
+        plannerStatus = total == 1 ? "1 task planned" : "\(total) tasks planned"
+        if buckets.isEmpty {
+            plannerStatus = "Nothing planned"
+            plannerSection.addView(
+                Self.plannerNote("Nothing in Today or Tomorrow."), in: .leading)
+        }
+        for (name, label) in Self.plannerBuckets {
+            guard let bucket = buckets.first(where: { $0.name == name }) else { continue }
+            let heading = NSTextField(labelWithString: "\(label) (\(bucket.tasks.count))")
+            heading.font = .systemFont(ofSize: 11, weight: .medium)
+            heading.textColor = .secondaryLabelColor
+            let rows = NSStackView(views: [heading])
+            rows.orientation = .vertical
+            rows.spacing = 2
+            rows.alignment = .leading
+            // Six a bucket, then a count — the same bargain the critical list
+            // makes, and for the same reason: a popover that grows with your
+            // workload is one that stops fitting on the screen on the day you
+            // most need to read it.
+            for task in bucket.tasks.prefix(6) {
+                rows.addView(Self.plannerRow(task, target: self, action: #selector(openTaskRow(_:))), in: .leading)
+            }
+            if bucket.tasks.count > 6 {
+                rows.addView(
+                    Self.plannerNote("and \(bucket.tasks.count - 6) more"), in: .leading)
+            }
+            plannerSection.addView(rows, in: .leading)
+        }
+        if isPlannerMode { applyMode() }
+        onResize?()
+    }
+
+    /// A task in a bucket: the same borderless row the critical list uses,
+    /// opening the same way, because they are the same gesture on the same
+    /// kind of thing and two styles for that would be two things to learn.
+    private static func plannerRow(
+        _ task: MCPClient.TaskSummary, target: AnyObject, action: Selector
+    ) -> NSButton {
+        let row = NSButton(title: task.title, target: target, action: action)
+        row.bezelStyle = .inline
+        row.isBordered = false
+        row.font = .systemFont(ofSize: 12)
+        row.alignment = .left
+        row.contentTintColor = .labelColor
+        row.identifier = NSUserInterfaceItemIdentifier(task.id)
+        row.lineBreakMode = .byTruncatingTail
+        return row
+    }
+
+    private static func plannerNote(_ text: String) -> NSTextField {
+        let note = NSTextField(labelWithString: text)
+        note.font = .systemFont(ofSize: 11)
+        note.textColor = .secondaryLabelColor
+        return note
     }
 
     // MARK: - The running timer
@@ -800,11 +1012,17 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         onPickOrganisation?(orgButton)
     }
 
+    @objc private func openInstance() {
+        onOpen?(.instance)
+    }
+
     @objc private func openCreated() {
         if let destination = createdDestination { onOpen?(destination) }
     }
 
-    @objc private func openCritical(_ sender: NSButton) {
+    /// Every task row in this view — the critical list and the planner's
+    /// buckets — carries its id in `identifier` and opens the same way.
+    @objc private func openTaskRow(_ sender: NSButton) {
         if let id = sender.identifier?.rawValue { onOpen?(.task(id)) }
     }
 
@@ -853,6 +1071,22 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// who has just finished typing one with no way to submit at all — this
     /// popover has no Create button to reach for — short of tabbing back to
     /// the title. ⌘⏎ is the same key those forms have always used.
+    /// So the Planner tab has somewhere to put first responder. Every other
+    /// mode hands it to the text field, which answers Escape itself through
+    /// `control(_:textView:doCommandBy:)`; a tab with no field would
+    /// otherwise leave the key nowhere to land.
+    override var acceptsFirstResponder: Bool { true }
+
+    override func keyDown(with event: NSEvent) {
+        // 53 is Escape. Matched by key code rather than by character because
+        // it has no sensible character, and every layout agrees about it.
+        if event.keyCode == 53 {
+            onEscape?()
+            return
+        }
+        super.keyDown(with: event)
+    }
+
     override func performKeyEquivalent(with event: NSEvent) -> Bool {
         guard event.modifierFlags.intersection(.deviceIndependentFlagsMask) == .command else {
             return super.performKeyEquivalent(with: event)

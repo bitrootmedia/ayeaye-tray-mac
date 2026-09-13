@@ -40,6 +40,48 @@ ok("a timestamp with fractional seconds parses",
 ok("…and one without them", MCPClient.date(from: "2026-09-11T09:12:03+00:00") != nil)
 ok("…and nonsense doesn't", MCPClient.date(from: "some time yesterday") == nil)
 
+// The three links out of the popover, which all hang off one address that a
+// person typed into Settings — so it may well end in a slash. Every one of
+// them is built from `homeURL`, and a double slash in the path of an SPA
+// route is a page that does not load.
+ok("the instance link is the address, trimmed",
+   MCPClient.homeURL(base: "https://ayeayecaptain.io/ ")?.absoluteString
+     == "https://ayeayecaptain.io")
+ok("…and an empty address is no link at all", MCPClient.homeURL(base: "  ") == nil)
+ok("…and a task link doesn't double the slash",
+   MCPClient.webURL(base: "https://ayeayecaptain.io/", organisationID: "o", taskID: "t")?
+     .absoluteString == "https://ayeayecaptain.io/orgs/o/tasks/t")
+ok("…nor does the Sparks one",
+   MCPClient.sparksURL(base: "https://ayeayecaptain.io/")?.absoluteString
+     == "https://ayeayecaptain.io/sparks")
+
+// The planner board, which is the densest prose this app reads: a bucket
+// header, indented rows, and a trailing sentence about unplanned work that is
+// addressed to a language model and must not be mistaken for a task.
+let board = """
+today (2):
+  [01a0957c-0101-7830-9e1a-def7c01c9fc5] | Order the bearing housing | status=todo | priority=high
+  [01a05299-3ab4-7824-8a92-18b727f1dc9e] | Ring the foundry | status=in_progress | priority=normal
+tomorrow (1):
+  [01a015bf-9f66-7826-80de-bcfd97907119] | Write the handover | status=todo | priority=low
+someday (1):
+  [01a05295-76a3-7ed3-8b23-6ff493e51d6c] | Learn the lathe | status=todo | priority=very_low
+
+7 open task(s) you have not planned. `list_tasks` shows them; `plan_task` queues one.
+"""
+let wanted = ["today", "tomorrow"]
+let parsed = MCPClient.plannerBoard(from: board, buckets: wanted)
+ok("the planner's two buckets come back", parsed.map(\.name) == wanted,
+   "got \(parsed.map(\.name))")
+ok("…with their rows, in order",
+   parsed.first?.tasks.map(\.title) == ["Order the bearing housing", "Ring the foundry"])
+ok("…and the buckets this tab doesn't show are dropped",
+   !parsed.contains { $0.name == "someday" })
+ok("…and the sentence about unplanned work is not a task",
+   parsed.allSatisfy { $0.tasks.allSatisfy { !$0.title.contains("unplanned") } })
+ok("an empty board parses as nothing planned",
+   MCPClient.plannerBoard(from: "Nothing on your planner.", buckets: wanted).isEmpty)
+
 let environment = ProcessInfo.processInfo.environment
 guard let org = environment["AYEAYE_ORG"], environment["AYEAYE_SERVER"] != nil,
       environment["AYEAYE_TOKEN"] != nil

@@ -15,12 +15,22 @@ which one you were last in, so one you mostly use one way opens that way.
 After it files a task you get a green tick, the title back, and **Open** to
 jump to it in the web app (a spark's **Open** goes to the Sparks screen,
 which is the only page a spark has). Click the organisation name to file into a
-different one. And if any of your tasks are **critical**, the anchor turns red and the
+different one, and the **globe beside it** opens your installation's front page
+in the browser — the one way out of the box that doesn't need something to have
+happened first. And if any of your tasks are **critical**, the anchor turns red and the
 popover lists them — click one to open it. That updates **live**: change
 something on the web and the tray follows in well under a second.
 
 Unread notifications show as a **count to the left of the anchor** — the same
 number as the bell in the web app, across every organisation.
+
+**Planner** is the third tab, and the one that reads rather than files: today's
+and tomorrow's buckets off your own planner board, in the order you put them in,
+and clicking one opens it in the web app. Only those two — This week, Next week
+and Someday are a board to arrange, not a list to glance at. It is refetched
+every time you open the tab and follows the socket while it's up, because a
+planner is the thing you rearranged five minutes ago. Unlike Task and Spark it
+is **not remembered**: the box always opens ready to type.
 
 **Details** (⌘D, or click it) opens the rest: a description, menus for
 project, priority, who is being asked to act and which day of your own
@@ -55,8 +65,11 @@ repeating back an id it was handed, and useless to anything that has to *offer* 
 choice. So ayeaye gained two read tools (`list_projects`, `list_members`) and a
 `planner_bucket` argument, later a `notifications` tool for the badge, and now
 `create_spark` — sparks had a REST route and no MCP one, so this box could file
-a task and not the thought that isn't one yet. Five additions, no new access
-path — they call the same services the web app calls, as the token's owner.
+a task and not the thought that isn't one yet. Then `my_planner`, for the tab of
+the same name: `create_task` has been able to *put* a task in a planner bucket
+since the Details panel existed, and nothing could read a board back out. Six
+additions, no new access path — they call the same services the web app calls,
+as the token's owner, and `my_planner` reads only the caller's own board.
 
 ## Build
 

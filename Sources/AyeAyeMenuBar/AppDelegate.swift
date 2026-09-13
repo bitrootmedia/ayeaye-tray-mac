@@ -65,9 +65,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 }
             case .sparks:
                 self.openSparks()
+            case .instance:
+                self.openInstance()
             }
         }
         quickAdd.onNeedsLists = { [weak self] in self?.loadLists() }
+        quickAdd.onNeedsPlanner = { [weak self] in self?.loadPlanner() }
         quickAdd.onResize = { [weak self] in self?.sizePopover() }
         quickAdd.onStopTimer = { [weak self] in self?.stopTiming() }
 
@@ -96,6 +99,11 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // timer exists per person across every organisation, and this
             // socket watches one.
             Task { await self.refreshTiming() }
+            // Only while somebody is looking at it. The planner is the one
+            // thing here with no presence outside its own tab — no icon, no
+            // badge — so refetching it when it isn't showing would be a call
+            // whose answer nothing could display.
+            if self.popover.isShown && self.quickAdd.isPlannerMode { self.loadPlanner() }
         }
         // A slept-through laptop has a socket the OS killed and a backoff
         // timer minutes from firing. Waking is the moment to stop waiting.
@@ -156,6 +164,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // that says the other one exists, and opens straight into it.
         menu.addItem(withTitle: "New task…", action: #selector(newTask), keyEquivalent: "")
         menu.addItem(withTitle: "New spark…", action: #selector(newSpark), keyEquivalent: "")
+        menu.addItem(withTitle: "Planner", action: #selector(showPlanner), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(.separator())
@@ -174,6 +183,23 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
 
     @objc private func newTask() { showPopover(sparkMode: false) }
     @objc private func newSpark() { showPopover(sparkMode: true) }
+
+    /// The third tab, from the menu that names it. Same never-a-toggle rule
+    /// as the two above: asking for the planner and having the box shut
+    /// because it was already open would be a strange answer.
+    @objc private func showPlanner() {
+        quickAdd.setPlannerMode()
+        if popover.isShown {
+            sizePopover()
+            return
+        }
+        // `togglePopover` refreshes, and refreshing deliberately puts the box
+        // back on a capture tab — so the mode is asked for again once it is
+        // on screen, rather than before.
+        togglePopover()
+        quickAdd.setPlannerMode()
+        sizePopover()
+    }
 
     /// Open the box in a named mode, from the menu that named it. Never a
     /// toggle: picking "New spark…" from a menu and having the box shut
@@ -504,9 +530,47 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // than showing nothing for a moment.
         critical = []
         quickAdd.showCritical(nil)
+        // Another organisation's planner, for the same reason as its projects
+        // and its critical list: the one on screen is about somewhere else
+        // now, and leaving it up under the new name would be the quietest
+        // possible lie.
+        if quickAdd.isPlannerMode { loadPlanner() }
         updateIcon()
         connectRealtime()
         Task { await refreshCritical() }
+    }
+
+    // MARK: - The planner
+
+    /// Today and tomorrow, for the tab showing them.
+    ///
+    /// Fetched every time the tab is opened rather than cached: unlike the
+    /// project and people menus — which are a fixed list this app holds for
+    /// as long as the organisation doesn't change — a planner is the thing
+    /// you rearranged five minutes ago in the web app, and a stale one is
+    /// worse than a moment's spinner.
+    private func loadPlanner() {
+        guard Settings.isConfigured, let org = Settings.organisationID else {
+            quickAdd.showPlanner(nil, reason: "Open Settings…")
+            return
+        }
+        Task { @MainActor in
+            do {
+                let buckets = try await MCPClient.fromSettings().planner(
+                    organisationID: org, buckets: QuickAddView.plannerBucketNames)
+                // Still the tab on screen? Switching to Task while this was
+                // in flight and then having a list appear under the text box
+                // is the race worth spending two lines on.
+                guard quickAdd.isPlannerMode else { return }
+                quickAdd.showPlanner(buckets)
+            } catch {
+                guard quickAdd.isPlannerMode else { return }
+                // The server's own sentence, which for the likeliest failure
+                // — an installation older than `my_planner` — names the tool
+                // it hasn't got.
+                quickAdd.showPlanner(nil, reason: error.localizedDescription)
+            }
+        }
     }
 
     // MARK: - Opening things in the browser
@@ -523,6 +587,16 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     /// `MCPClient.sparksURL`.
     private func openSparks() {
         guard let base = Settings.baseURL, let url = MCPClient.sparksURL(base: base) else { return }
+        NSWorkspace.shared.open(url)
+        popover.performClose(nil)
+    }
+
+    /// The installation itself, from the globe in the footer. Closes the
+    /// popover like every other link out of it — you asked to be somewhere
+    /// else, and a box still sitting over the browser you just opened is
+    /// one Escape you should not have to press.
+    private func openInstance() {
+        guard let base = Settings.baseURL, let url = MCPClient.homeURL(base: base) else { return }
         NSWorkspace.shared.open(url)
         popover.performClose(nil)
     }

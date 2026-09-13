@@ -50,7 +50,11 @@ enum MCPError: LocalizedError {
 /// is the right answer, because there is nowhere for a spark to go.
 /// `running_timer` was added for the timer indicator on the icon: the
 /// endpoint already had `start_timer` and `stop_timer`, and nothing that
-/// could ask what was running.
+/// could ask what was running. `my_planner` is the newest and the same
+/// shape of gap: `create_task` could *put* a task in a planner bucket from
+/// the first version of the Details panel, and nothing could read a board
+/// back. The Planner tab says so plainly against a server that hasn't got
+/// it — an empty list and "this server cannot tell me" must not look alike.
 struct MCPClient {
     let baseURL: String
     let token: String
@@ -232,9 +236,24 @@ struct MCPClient {
     /// spark isn't in an organisation — it sits at the bare root next to
     /// the inbox, which is the SPA's own route for it.
     static func sparksURL(base: String) -> URL? {
+        guard let home = homeURL(base: base) else { return nil }
+        return URL(string: home.absoluteString + "/sparks")
+    }
+
+    /// The installation itself — whatever `Settings.baseURL` names, and no
+    /// route past it.
+    ///
+    /// The one link here that asserts nothing about what you will find: a
+    /// task link can 404 if the id is wrong or the organisation isn't the
+    /// one it is in, and this cannot, because the address *is* the setting
+    /// the whole app is pointed at. It is also the only way out of the box
+    /// that doesn't require something to have happened first — no created
+    /// task, no critical list, no running timer.
+    static func homeURL(base: String) -> URL? {
         var trimmed = base.trimmingCharacters(in: .whitespaces)
         while trimmed.hasSuffix("/") { trimmed.removeLast() }
-        return URL(string: trimmed + "/sparks")
+        guard !trimmed.isEmpty else { return nil }
+        return URL(string: trimmed)
     }
 
     // MARK: - The lists behind the pickers
@@ -320,6 +339,81 @@ struct MCPClient {
             let fields = line.split(separator: "|").map { $0.trimmingCharacters(in: .whitespaces) }
             guard fields.count > 1 else { return nil }
             return TaskSummary(id: id, title: fields[1])
+        }
+    }
+
+    // MARK: - The planner
+
+    /// One bucket off your own planner board, and what is in it.
+    struct PlannerBucket {
+        /// The server's own name for it — `today`, `tomorrow`, and the three
+        /// this app doesn't ask for.
+        let name: String
+        let tasks: [TaskSummary]
+    }
+
+    /// Your planner, narrowed to the buckets asked for and put in that order.
+    ///
+    /// `my_planner` is the newest of the reads this app leans on and the one
+    /// most likely to be missing: against an installation that predates it
+    /// the call is refused by name, and the tab says so rather than showing
+    /// an empty board — "you have planned nothing today" and "this server
+    /// cannot tell me" are different answers and only one of them is calm.
+    ///
+    /// **Yours, and only ever yours.** The tool takes no user argument at
+    /// all — an admin arranges somebody else's board from the web app, and
+    /// there is no way to read a colleague's from here.
+    ///
+    /// The answer is a board written for a language model:
+    ///
+    /// ```
+    /// today (2):
+    ///   [uuid] | Order the bearing housing | status=todo | priority=high
+    /// tomorrow (1):
+    ///   [uuid] | Ring the foundry | status=todo | priority=normal
+    ///
+    /// 7 open task(s) you have not planned. …
+    /// ```
+    ///
+    /// A header is `<bucket> (<n>):` and a row is the same `[id] | title | …`
+    /// every other list here speaks, indented under it. The trailing sentence
+    /// about unplanned work is for a model deciding what to do next and is
+    /// not a row, which is why rows are recognised by their bracket rather
+    /// than by not being a header.
+    func planner(organisationID: String, buckets wanted: [String]) async throws -> [PlannerBucket] {
+        let text = try await call(
+            tool: "my_planner", arguments: ["organisation_id": organisationID])
+        return Self.plannerBoard(from: text, buckets: wanted)
+    }
+
+    /// The parse on its own, so `make check-create` can pin it without a
+    /// server — which is the whole point of that file: prose written for a
+    /// language model is a contract no compiler checks, and a reworded board
+    /// would leave this tab permanently empty with no error anywhere.
+    static func plannerBoard(from text: String, buckets wanted: [String]) -> [PlannerBucket] {
+        var found: [String: [TaskSummary]] = [:]
+        var bucket: String?
+        for raw in text.split(separator: "\n") {
+            let line = raw.trimmingCharacters(in: .whitespaces)
+            if line.hasPrefix("[") {
+                guard let id = Self.firstBracketedID(in: line) else { continue }
+                let fields = line.split(separator: "|").map {
+                    $0.trimmingCharacters(in: .whitespaces)
+                }
+                guard fields.count > 1, let name = bucket else { continue }
+                found[name, default: []].append(TaskSummary(id: id, title: fields[1]))
+            } else if line.hasSuffix(":"), let paren = line.firstIndex(of: "(") {
+                bucket = String(line[..<paren]).trimmingCharacters(in: .whitespaces)
+            }
+        }
+        // Walked in the caller's order rather than the answer's, which is the
+        // same discipline the server applies to its own BUCKETS constant: the
+        // order of a planner is the whole meaning of a planner, and inheriting
+        // it from however the rows happened to arrive is how it gets silently
+        // re-spelled later.
+        return wanted.compactMap { name in
+            guard let tasks = found[name], !tasks.isEmpty else { return nil }
+            return PlannerBucket(name: name, tasks: tasks)
         }
     }
 
@@ -446,9 +540,8 @@ struct MCPClient {
     /// Where a task lives in the web app. The SPA's own route, which is the
     /// contract this relies on — `orgs/:orgId/tasks/:taskId`.
     static func webURL(base: String, organisationID: String, taskID: String) -> URL? {
-        var trimmed = base.trimmingCharacters(in: .whitespaces)
-        while trimmed.hasSuffix("/") { trimmed.removeLast() }
-        return URL(string: "\(trimmed)/orgs/\(organisationID)/tasks/\(taskID)")
+        guard let home = homeURL(base: base) else { return nil }
+        return URL(string: "\(home.absoluteString)/orgs/\(organisationID)/tasks/\(taskID)")
     }
 
     struct Organisation {
