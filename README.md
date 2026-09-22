@@ -22,9 +22,21 @@ popover lists them — click one to open it. That updates **live**: change
 something on the web and the tray follows in well under a second.
 
 Unread notifications show as a **count to the left of the anchor** — the same
-number as the bell in the web app, across every organisation.
+number as the bell in the web app, across every organisation — and
+**Notifications** is the tab that list lives on. Each row says what happened
+and how long ago, clicking one opens the thing it is about, and the tick beside
+it marks it read: the row goes, the count drops, and the notification is still
+in the web app's inbox afterwards. **Mark all read** is under the list. Nothing
+here deletes anything — the bin is in the web app, where you are looking at
+what you are throwing away.
 
-**Planner** is the third tab, and the one that reads rather than files: today's
+It is the one tab that ignores the organisation, because notifications are
+addressed to a person rather than filed in a place; switching organisation
+neither adds to the list nor takes from it, which is exactly what the count on
+the icon has always meant.
+
+**Planner** is the third tab, and the first of the two that read rather than
+file: today's
 and tomorrow's buckets off your own planner board, in the order you put them in,
 and clicking one opens it in the web app. Only those two — This week, Next week
 and Someday are a board to arrange, not a list to glance at. It is refetched
@@ -70,6 +82,14 @@ the same name: `create_task` has been able to *put* a task in a planner bucket
 since the Details panel existed, and nothing could read a board back out. Six
 additions, no new access path — they call the same services the web app calls,
 as the token's owner, and `my_planner` reads only the caller's own board.
+
+The Notifications tab added the first two that *write*:
+`mark_notification_read` and `mark_all_notifications_read`, plus a link and a
+timestamp on each row `notifications` answers with. The badge could count what
+you had not read and do nothing about it, which is a number that only ever goes
+up. There is deliberately no delete tool — marking read is a fact about you and
+throws nothing away, and a popover with no undo is the wrong place to decide a
+record of what happened is not worth keeping.
 
 ## Build
 

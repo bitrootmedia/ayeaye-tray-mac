@@ -55,6 +55,12 @@ enum MCPError: LocalizedError {
 /// the first version of the Details panel, and nothing could read a board
 /// back. The Planner tab says so plainly against a server that hasn't got
 /// it — an empty list and "this server cannot tell me" must not look alike.
+/// `mark_notification_read` and `mark_all_notifications_read` are the
+/// newest, and the first *writes* added for this app rather than reads: the
+/// badge could count unread notifications and do nothing about them, which
+/// is a number that only ever goes up. The same tab made `notifications`
+/// answer with a link and a timestamp per row, so an inbox you can act on
+/// knows where a thing goes and how old it is.
 struct MCPClient {
     let baseURL: String
     let token: String
@@ -417,6 +423,47 @@ struct MCPClient {
         }
     }
 
+    // MARK: - The inbox
+
+    /// One unread notification, as the tab lists it.
+    ///
+    /// **Not organisation-scoped**, alone among the things this app lists: a
+    /// notification is addressed to a person rather than filed in a place,
+    /// so switching organisation neither adds to this list nor takes from
+    /// it. That is the same rule the badge follows, and it has to be — the
+    /// tab is the badge's own list, and a list that disagreed with the
+    /// number on the icon would send you looking for the difference.
+    struct Notification {
+        let id: String
+        let title: String
+        /// The server's own `kind`, unprettified — `task_action_required`
+        /// and the dozen others. Turned into words by `label(forKind:)`,
+        /// here rather than on the server because it is a display decision
+        /// and the tool's audience is mostly not a person.
+        let kind: String
+        /// Where the web app puts this notification's subject, relative to
+        /// the installation — `/orgs/…/tasks/…`. The server's stored
+        /// `link_path`, not a route this app reassembles out of ids in a
+        /// title, so the two can never disagree. `nil` for the handful of
+        /// notifications that are about nothing openable.
+        let linkPath: String?
+        /// When it arrived, so the row can say how old it is. The elapsed
+        /// string is worked out here for the same reason the timer's is: a
+        /// formatted age is right when it is written and wrong an hour later.
+        let createdAt: Date?
+    }
+
+    /// The unread inbox, and how many there are.
+    ///
+    /// The count is not `items.count`: the tool answers with every unread
+    /// notification up to `limit` and states the real total on its first
+    /// line, so a person with forty unread sees ten rows and the honest
+    /// number. That is also why the badge can ask for `limit: 1`.
+    func notifications(limit: Int = 20) async throws -> (unread: Int, items: [Notification]) {
+        let text = try await call(tool: "notifications", arguments: ["limit": limit])
+        return try Self.inbox(from: text)
+    }
+
     /// How many notifications you have not read, across every organisation.
     ///
     /// **Not scoped to the selected organisation, unlike everything else this
@@ -426,13 +473,123 @@ struct MCPClient {
     /// was lying.
     ///
     /// The tool leads with the count on its own line (`3 unread:`) precisely
-    /// so a caller that only wants the number doesn't have to count rows.
+    /// so a caller that only wants the number doesn't have to count rows —
+    /// which is why the badge asks for one row rather than for none: `limit`
+    /// has a floor of 1 on the server, and the answer's first line is the
+    /// whole of what this reads.
     func unreadNotifications() async throws -> Int {
-        let text = try await call(tool: "notifications", arguments: ["limit": 1])
-        guard let first = text.split(separator: "\n").first else { return 0 }
+        try await notifications(limit: 1).unread
+    }
+
+    /// The parse on its own, so `make check-create` can pin it without a
+    /// server — the same bargain `plannerBoard` makes, and the same risk: a
+    /// reworded row would leave the tab permanently empty and no error
+    /// anywhere.
+    ///
+    /// ```
+    /// 2 unread:
+    /// [uuid] | Ada asked you to act | kind=task_action_required | at=2026-09-22T09:12:03+00:00 | link=/orgs/…/tasks/…
+    /// ```
+    ///
+    /// The count leads on its own line and is there even when nothing is
+    /// listed (`0 unread.`). Rows are recognised by their bracket, like
+    /// every other list here, and their keyed fields are read by name rather
+    /// than by position — a title containing a `|` shifts the columns, and
+    /// the fields that decide where a row *goes* must not move with it.
+    static func inbox(from text: String) throws -> (unread: Int, items: [Notification]) {
+        guard let first = text.split(separator: "\n").first else { return (0, []) }
         let digits = first.prefix { $0.isNumber }
-        guard let count = Int(digits) else { throw MCPError.malformed("that unread count") }
-        return count
+        guard let unread = Int(digits) else { throw MCPError.malformed("that unread count") }
+        let items = text.split(separator: "\n").compactMap { line -> Notification? in
+            guard line.hasPrefix("["), let id = firstBracketedID(in: line) else { return nil }
+            let fields = line.split(separator: "|").map {
+                $0.trimmingCharacters(in: .whitespaces)
+            }
+            guard fields.count > 1 else { return nil }
+            func value(_ key: String) -> String? {
+                fields.first { $0.hasPrefix(key + "=") }
+                    .map { String($0.dropFirst(key.count + 1)) }
+            }
+            // A read one can only arrive here if something asked for them —
+            // the tab doesn't — and it would be a row that vanishes when the
+            // list next reloads, which is worse than not showing it.
+            guard !fields.contains("read") else { return nil }
+            return Notification(
+                id: id, title: fields[1], kind: value("kind") ?? "",
+                linkPath: value("link"), createdAt: value("at").flatMap(date(from:)))
+        }
+        return (unread, items)
+    }
+
+    /// Mark one read. The tick on a row, and what takes the badge down.
+    ///
+    /// Nothing is deleted: the notification stays in the web app's inbox as
+    /// history, which is the reason this tab's button is a tick rather than
+    /// a bin. A read-only token is refused by name, the same as every other
+    /// write here.
+    func markNotificationRead(id: String) async throws {
+        _ = try await call(tool: "mark_notification_read", arguments: ["notification_id": id])
+    }
+
+    /// Mark the lot read, across every organisation — the web app's own
+    /// "Mark all read".
+    func markAllNotificationsRead() async throws {
+        _ = try await call(tool: "mark_all_notifications_read", arguments: [:])
+    }
+
+    /// Where a notification points, as an address. The server stores a path
+    /// relative to the installation precisely so it survives being deployed
+    /// on any hostname, and this is the one place it is joined to one.
+    static func linkURL(base: String, path: String) -> URL? {
+        guard let home = homeURL(base: base) else { return nil }
+        let route = path.hasPrefix("/") ? path : "/" + path
+        return URL(string: home.absoluteString + route)
+    }
+
+    /// The server's `kind` as something to read.
+    ///
+    /// A closed set on the server (a CHECK constraint, see
+    /// `models/notification.py`), so this could be exhaustive — and is
+    /// deliberately not: an installation newer than this app will raise
+    /// kinds it has never heard of, and "book_shared" spelled out is a
+    /// better answer than a row that refuses to say what it is.
+    static func label(forKind kind: String) -> String {
+        switch kind {
+        case "task_action_required": return "Asked to act"
+        case "task_action_required_cleared": return "Handed back"
+        case "task_owner_changed": return "Owner changed"
+        case "task_closed": return "Closed"
+        case "task_shared": return "Shared with you"
+        case "project_shared": return "Project shared"
+        case "reminder_soon": return "Reminder coming"
+        case "reminder_due": return "Reminder due"
+        case "task_deadline_tomorrow": return "Due tomorrow"
+        case "daily_summary": return "Daily summary"
+        case "export_ready": return "Export"
+        case "book_shared": return "Book shared"
+        case "comment_mention": return "Mentioned you"
+        default:
+            let words = kind.replacingOccurrences(of: "_", with: " ")
+            return words.isEmpty ? "Notification" : words.prefix(1).uppercased() + words.dropFirst()
+        }
+    }
+
+    /// How long ago, in the fewest characters that are still true.
+    ///
+    /// Coarser than the timer's `elapsed`, on purpose: a running clock is
+    /// something you are watching to the minute, and a notification is
+    /// something that arrived at some point — "2h" is the whole of what a
+    /// row three inches wide has room to say about when.
+    static func age(since start: Date) -> String {
+        let seconds = max(0, Int(Date().timeIntervalSince(start)))
+        let minutes = seconds / 60
+        if minutes < 1 { return "now" }
+        if minutes < 60 { return "\(minutes)m" }
+        let hours = minutes / 60
+        if hours < 24 { return "\(hours)h" }
+        let days = hours / 24
+        if days < 7 { return "\(days)d" }
+        return "\(days / 7)w"
     }
 
     // MARK: - The timer

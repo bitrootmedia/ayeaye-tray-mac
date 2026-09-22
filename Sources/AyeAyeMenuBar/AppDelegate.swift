@@ -67,10 +67,15 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 self.openSparks()
             case .instance:
                 self.openInstance()
+            case let .link(path):
+                self.openInWeb(path: path)
             }
         }
         quickAdd.onNeedsLists = { [weak self] in self?.loadLists() }
         quickAdd.onNeedsPlanner = { [weak self] in self?.loadPlanner() }
+        quickAdd.onNeedsNotifications = { [weak self] in self?.loadNotifications() }
+        quickAdd.onCloseNotification = { [weak self] id in self?.closeNotification(id) }
+        quickAdd.onCloseAllNotifications = { [weak self] in self?.closeAllNotifications() }
         quickAdd.onResize = { [weak self] in self?.sizePopover() }
         quickAdd.onStopTimer = { [weak self] in self?.stopTiming() }
 
@@ -104,6 +109,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             // badge — so refetching it when it isn't showing would be a call
             // whose answer nothing could display.
             if self.popover.isShown && self.quickAdd.isPlannerMode { self.loadPlanner() }
+            // The same rule for the inbox, which does have a presence outside
+            // its tab — the badge — but whose *list* nothing else can show.
+            // `refreshUnread` above keeps the number right either way.
+            if self.popover.isShown && self.quickAdd.isNotificationsMode {
+                self.loadNotifications()
+            }
         }
         // A slept-through laptop has a socket the OS killed and a backoff
         // timer minutes from firing. Waking is the moment to stop waiting.
@@ -165,6 +176,12 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         menu.addItem(withTitle: "New task…", action: #selector(newTask), keyEquivalent: "")
         menu.addItem(withTitle: "New spark…", action: #selector(newSpark), keyEquivalent: "")
         menu.addItem(withTitle: "Planner", action: #selector(showPlanner), keyEquivalent: "")
+        // Named with its count, because the menu is the one place with room
+        // to say it and because a bare "Notifications" is a thing you have to
+        // open to find out whether it was worth opening.
+        menu.addItem(
+            withTitle: unread > 0 ? "Notifications (\(unread))" : "Notifications",
+            action: #selector(showNotifications), keyEquivalent: "")
         menu.addItem(.separator())
         menu.addItem(withTitle: "Settings…", action: #selector(openSettings), keyEquivalent: ",")
         menu.addItem(.separator())
@@ -198,6 +215,21 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         // on screen, rather than before.
         togglePopover()
         quickAdd.setPlannerMode()
+        sizePopover()
+    }
+
+    /// The fourth tab, from the menu that names it — and the same
+    /// never-a-toggle rule as the three above.
+    @objc private func showNotifications() {
+        quickAdd.setNotificationsMode()
+        if popover.isShown {
+            sizePopover()
+            return
+        }
+        // `togglePopover` refreshes, and refreshing puts the box back on a
+        // capture tab — so the mode is asked for again once it is on screen.
+        togglePopover()
+        quickAdd.setNotificationsMode()
         sizePopover()
     }
 
@@ -573,11 +605,107 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
     }
 
+    // MARK: - The inbox
+
+    /// What you haven't read, for the tab showing it.
+    ///
+    /// Fetched on every open, like the planner and for the same reason: it is
+    /// a list that changes without you, and a stale one is worse than a
+    /// moment's "Loading…". **No organisation goes into this call** — the
+    /// inbox is the one list here that belongs to a person rather than to a
+    /// place, which is also why switching organisation doesn't reload it.
+    private func loadNotifications() {
+        Task { @MainActor in await reloadNotifications() }
+    }
+
+    /// The same, awaited — so a failed tick can put its complaint in the
+    /// status line *after* the reload that would otherwise paint over it.
+    @MainActor
+    private func reloadNotifications() async {
+        guard Settings.isConnected else {
+            quickAdd.showNotifications(nil, reason: "Open Settings…")
+            return
+        }
+        do {
+            let inbox = try await MCPClient.fromSettings().notifications()
+            guard quickAdd.isNotificationsMode else { return }
+            quickAdd.showNotifications(inbox.items, unread: inbox.unread)
+            // The badge and the list come out of the same answer, so this is
+            // free and keeps the two from disagreeing while somebody is
+            // looking at both.
+            unread = inbox.unread
+            updateIcon()
+        } catch {
+            guard quickAdd.isNotificationsMode else { return }
+            // The server's own sentence — against an installation older than
+            // the `notifications` tool it names the tool it hasn't got, which
+            // is the likeliest reason this tab is empty.
+            quickAdd.showNotifications(nil, reason: error.localizedDescription)
+        }
+    }
+
+    /// Mark one read, from its tick or from opening it.
+    ///
+    /// Optimistic about nothing, the same as stopping a timer: the row goes
+    /// when the reload says it has gone. The badge is the point of this tab,
+    /// and a list that tidied itself up on the click would disagree with the
+    /// number on the icon every time a call failed.
+    private func closeNotification(_ id: String) {
+        Task { @MainActor in
+            var problem: String?
+            do {
+                try await MCPClient.fromSettings().markNotificationRead(id: id)
+            } catch {
+                problem = error.localizedDescription
+            }
+            await refreshUnread()
+            // Reloaded even when it failed: the row is now of unknown state,
+            // and the tick it was clicked with is disabled until something
+            // redraws it. The complaint goes on afterwards, or the reload
+            // would paint the count straight over it.
+            if popover.isShown && quickAdd.isNotificationsMode {
+                await reloadNotifications()
+                if let problem = problem { quickAdd.reportInbox(problem) }
+            }
+        }
+    }
+
+    /// The whole inbox, from the button under the list.
+    private func closeAllNotifications() {
+        Task { @MainActor in
+            var problem: String?
+            do {
+                try await MCPClient.fromSettings().markAllNotificationsRead()
+            } catch {
+                problem = error.localizedDescription
+            }
+            quickAdd.markAllFinished()
+            await refreshUnread()
+            if popover.isShown && quickAdd.isNotificationsMode {
+                await reloadNotifications()
+                if let problem = problem { quickAdd.reportInbox(problem) }
+            }
+        }
+    }
+
     // MARK: - Opening things in the browser
 
     private func openInWeb(taskID: String, organisationID: String?) {
         guard let base = Settings.baseURL, let org = organisationID,
               let url = MCPClient.webURL(base: base, organisationID: org, taskID: taskID)
+        else { return }
+        NSWorkspace.shared.open(url)
+        popover.performClose(nil)
+    }
+
+    /// Wherever a notification points, as the server stored it: a path
+    /// relative to the installation, joined to whatever address Settings
+    /// names. **Not rebuilt from the selected organisation** — a
+    /// notification can be about another one entirely, and the whole reason
+    /// the row carries a link is that this app should not be guessing.
+    private func openInWeb(path: String) {
+        guard let base = Settings.baseURL,
+              let url = MCPClient.linkURL(base: base, path: path)
         else { return }
         NSWorkspace.shared.open(url)
         popover.performClose(nil)

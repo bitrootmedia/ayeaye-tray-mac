@@ -144,6 +144,19 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// is the one mode that files nothing, so leaving an empty box above a
     /// list would be inviting a Return that has nowhere to go.
     private let plannerSection = NSStackView()
+    /// The Notifications tab's whole content, built the same way and in the
+    /// same place as the planner's — one row per unread notification, and a
+    /// Mark all read under them.
+    ///
+    /// **The one list here that is not about the selected organisation.** A
+    /// notification is addressed to a person, so this is every organisation
+    /// at once, which is also what the badge counts. The footer says so
+    /// rather than the tab having an organisation button that would be a
+    /// lie about what it filters.
+    private let notificationsSection = NSStackView()
+    private let notificationsList = NSStackView()
+    private let markAllButton = NSButton()
+
     /// The same shape as the critical section, one row below it: hidden when
     /// nothing is being timed, and naming the one task when something is.
     private let timerSection = NSStackView()
@@ -185,6 +198,12 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         /// The installation's own front page — `Settings.baseURL` and
         /// nothing after it.
         case instance
+        /// Wherever a notification says its subject is, as the path the
+        /// server stored with it — `/orgs/…/tasks/…`. **Not `.task`**, even
+        /// though most of them are tasks: the notification already carries a
+        /// route, and rebuilding one from the selected organisation would
+        /// open the wrong page for a notification raised somewhere else.
+        case link(String)
     }
 
     /// Called with the whole draft. Returns when the task exists.
@@ -200,6 +219,12 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     var onNeedsLists: (() -> Void)?
     /// The Planner tab is showing and wants today's and tomorrow's work.
     var onNeedsPlanner: (() -> Void)?
+    /// The Notifications tab is showing and wants the unread ones.
+    var onNeedsNotifications: (() -> Void)?
+    /// One notification's tick was clicked — mark it read.
+    var onCloseNotification: ((String) -> Void)?
+    /// Mark all read was clicked.
+    var onCloseAllNotifications: (() -> Void)?
     /// The view is a different height now, and only the popover can resize.
     var onResize: (() -> Void)?
     /// The Stop button on the timing row was clicked.
@@ -240,15 +265,21 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         // Labels, not icons: "Task" and "Spark" are the words the web app
         // uses for the two things, and a 16pt glyph for "a thought you have
         // not decided anything about yet" does not exist.
-        modePicker.segmentCount = 3
+        modePicker.segmentCount = 4
         modePicker.setLabel("Task", forSegment: 0)
         modePicker.setLabel("Spark", forSegment: 1)
-        // The third is not a third kind of thing to file — it is the one tab
-        // that reads rather than writes. It sits in the same control anyway
-        // because it is the same question answered a different way ("what am
-        // I doing?"), and a separate control for one button would be a second
-        // row of chrome above a box whose whole argument is that it is small.
+        // The last two are not further kinds of thing to file — they are the
+        // tabs that read rather than write. They sit in the same control
+        // anyway because they are the same question answered a different way
+        // ("what am I doing?", "what happened?"), and a separate control for
+        // two buttons would be a second row of chrome above a box whose whole
+        // argument is that it is small.
         modePicker.setLabel("Planner", forSegment: 2)
+        // The badge on the icon is what sends anybody here, so the tab is
+        // named after the thing the badge counts rather than after the bell
+        // or an inbox — three words for the same idea in one app is two too
+        // many.
+        modePicker.setLabel("Notifications", forSegment: 3)
         modePicker.trackingMode = .selectOne
         modePicker.controlSize = .small
         modePicker.font = .systemFont(ofSize: 11)
@@ -257,7 +288,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         modePicker.action = #selector(modeChanged)
         modePicker.toolTip =
             "What ⏎ files: a task, or a spark only you ever see (⌘J) — "
-            + "or today's and tomorrow's planner"
+            + "or today's and tomorrow's planner, or what you haven't read"
         modePicker.setContentHuggingPriority(.required, for: .horizontal)
 
         field.placeholderString = "New task…"
@@ -396,6 +427,29 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         plannerSection.alignment = .leading
         plannerSection.isHidden = true
 
+        // Built like the planner's, and for the same reasons — no heading of
+        // its own, because the tab is the heading, and the whole body of the
+        // box while it is showing.
+        notificationsList.orientation = .vertical
+        notificationsList.spacing = 6
+        notificationsList.alignment = .leading
+        // Not a destructive-looking button and not a prominent one: it is the
+        // tidying-up gesture at the bottom of a list, and the rows above are
+        // what somebody came here to read.
+        markAllButton.title = "Mark all read"
+        markAllButton.bezelStyle = .rounded
+        markAllButton.controlSize = .small
+        markAllButton.font = .systemFont(ofSize: 11)
+        markAllButton.target = self
+        markAllButton.action = #selector(closeAllNotifications)
+        markAllButton.isHidden = true
+        markAllButton.toolTip = "Mark every notification read, in every organisation"
+        notificationsSection.setViews([notificationsList, markAllButton], in: .leading)
+        notificationsSection.orientation = .vertical
+        notificationsSection.spacing = 8
+        notificationsSection.alignment = .leading
+        notificationsSection.isHidden = true
+
         // The running timer, built like the critical section above it and for
         // the same reason: it is the other thing this box reports rather than
         // files, it is absent most of the time, and a heading with nothing
@@ -450,8 +504,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
 
         let stack = NSStackView(
             views: [
-                modePicker, field, confirmation, plannerSection, detailsToggle, details, footer,
-                criticalSection, timerSection,
+                modePicker, field, confirmation, plannerSection, notificationsSection,
+                detailsToggle, details, footer, criticalSection, timerSection,
             ])
         stack.orientation = .vertical
         stack.spacing = 8
@@ -476,6 +530,9 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
             details.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             footer.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             plannerSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
+            notificationsSection.widthAnchor.constraint(
+                equalTo: stack.widthAnchor, constant: -24),
+            notificationsList.widthAnchor.constraint(equalTo: notificationsSection.widthAnchor),
             criticalSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
             rule.widthAnchor.constraint(equalTo: criticalSection.widthAnchor),
             timerSection.widthAnchor.constraint(equalTo: stack.widthAnchor, constant: -24),
@@ -629,8 +686,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// quiet lie about where the next task is going.
     func refresh() {
         // The box opens ready to type, never onto the list it was last
-        // showing — see `isPlannerMode` for why that one isn't remembered.
-        if isPlannerMode { modePicker.selectedSegment = Settings.capturesSparks ? 1 : 0 }
+        // showing — see `isReadingMode` for why those two aren't remembered.
+        if isReadingMode { modePicker.selectedSegment = Settings.capturesSparks ? 1 : 0 }
         clearConfirmation()
         orgButton.title = Settings.isConfigured
             ? (Settings.organisationName ?? "Unknown organisation")
@@ -663,6 +720,17 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// a keystroke, a sentence and Return. `refresh` puts it back.
     var isPlannerMode: Bool { modePicker.selectedSegment == 2 }
 
+    /// The other read-only tab: what you haven't read, across every
+    /// organisation. Not remembered either, for the identical reason.
+    var isNotificationsMode: Bool { modePicker.selectedSegment == 3 }
+
+    /// Either of the two that read rather than file. Nearly everything the
+    /// box does differently in one of them it does in both — no text field,
+    /// no Details, nothing for Return to do — so the difference worth naming
+    /// is reading versus filing, and the two tabs differ only in what they
+    /// then put on screen.
+    var isReadingMode: Bool { isPlannerMode || isNotificationsMode }
+
     /// Set from outside — the right-click menu offers both by name, and
     /// picking one there has to arrive here before the box is shown.
     func setSparkMode(_ on: Bool) {
@@ -677,6 +745,14 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         modePicker.selectedSegment = 2
         applyMode()
         onNeedsPlanner?()
+    }
+
+    /// Show the Notifications tab, from outside — the right-click menu
+    /// offers it by name, and the badge on the icon is a thing you click.
+    func setNotificationsMode() {
+        modePicker.selectedSegment = 3
+        applyMode()
+        onNeedsNotifications?()
     }
 
     /// Everything that differs between a task and a spark, in one place.
@@ -695,38 +771,48 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     private func applyMode() {
         let spark = isSparkMode
         let planner = isPlannerMode
+        let inbox = isNotificationsMode
+        let reading = planner || inbox
         // A spark needs no organisation, so the bar for it is lower — the
         // server's own record has no organisation_id at all, and somebody
         // who has been invited nowhere yet can still capture one.
         let ready = spark ? Settings.isConnected : Settings.isConfigured
-        let confirming = !confirmation.isHidden && !planner
+        let confirming = !confirmation.isHidden && !reading
 
         field.placeholderString = spark ? "New spark…" : "New task…"
         field.isEnabled = ready
-        // The field and the confirmation both go: the Planner tab replaces
+        // The field and the confirmation both go: a reading tab replaces
         // the whole writing half of the box rather than sitting under it.
-        field.isHidden = planner
+        field.isHidden = reading
         confirmation.isHidden = !confirming
         plannerSection.isHidden = !planner
+        notificationsSection.isHidden = !inbox
         modePicker.isEnabled = Settings.isConnected
         // The organisation still names where this list comes from — a planner
         // is read one organisation at a time, same as everything else here —
         // so the button stays, and switching from it reloads the tab.
-        orgButton.isHidden = spark
+        //
+        // **Except on the inbox**, which is the one list here that is not
+        // about an organisation at all: notifications are addressed to a
+        // person, so an organisation name over this list would be a filter
+        // that isn't being applied. The spark note's own row says so instead.
+        orgButton.isHidden = spark || inbox
         sparkNote.isHidden = !spark || planner
-        detailsToggle.isHidden = spark || planner || confirming
+        detailsToggle.isHidden = spark || reading || confirming
         detailsToggle.isEnabled = Settings.isConfigured
-        details.isHidden = spark || planner || confirming || !Settings.detailsExpanded
+        details.isHidden = spark || reading || confirming || !Settings.detailsExpanded
         updateDetailsToggle()
         // Not while the confirmation is up: that owns this line, in green,
         // and it has to outlive anything else touching the box.
         guard !confirming else { return }
-        if planner {
+        if reading {
             // Whatever the tab last said about itself — "Loading…", a count,
-            // or why there is nothing to show. Set by `showPlanner`, and left
-            // alone here so switching away and back doesn't blank it.
-            statusLabel.textColor = plannerFailed ? .systemRed : .secondaryLabelColor
-            statusLabel.stringValue = plannerStatus
+            // or why there is nothing to show. Set by `showPlanner` and
+            // `showNotifications`, and left alone here so switching away and
+            // back doesn't blank it.
+            let failed = planner ? plannerFailed : inboxFailed
+            statusLabel.textColor = failed ? .systemRed : .secondaryLabelColor
+            statusLabel.stringValue = planner ? plannerStatus : inboxStatus
             return
         }
         statusLabel.stringValue = ready
@@ -740,23 +826,28 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     }
 
     @objc private func modeChanged() {
-        // Only the two capture modes are remembered — see `isPlannerMode`.
-        if !isPlannerMode { Settings.capturesSparks = isSparkMode }
-        if isPlannerMode {
+        // Only the two capture modes are remembered — see `isReadingMode`.
+        if !isReadingMode { Settings.capturesSparks = isSparkMode }
+        if isReadingMode {
             // A green tick about the task you just filed is about the writing
             // half of the box, and the writing half has just gone away.
             createdDestination = nil
             confirmation.isHidden = true
-            plannerStatus = "Loading…"
-            plannerFailed = false
+            if isPlannerMode {
+                plannerStatus = "Loading…"
+                plannerFailed = false
+            } else {
+                inboxStatus = "Loading…"
+                inboxFailed = false
+            }
         }
         applyMode()
         onResize?()
-        // Nothing to type into on the Planner tab, and handing first
-        // responder to a hidden field is how a popover stops answering
-        // Escape.
-        window?.makeFirstResponder(isPlannerMode ? self : field)
+        // Nothing to type into on a reading tab, and handing first responder
+        // to a hidden field is how a popover stops answering Escape.
+        window?.makeFirstResponder(isReadingMode ? self : field)
         if isPlannerMode { onNeedsPlanner?() }
+        if isNotificationsMode { onNeedsNotifications?() }
         // Coming back to Task with the panel already open: its menus may
         // never have been fetched, since the panel was closed the whole time
         // the box was in the other mode.
@@ -906,7 +997,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
             // use than anything this app could guess.
             plannerStatus = reason ?? "Couldn't load your planner"
             plannerSection.addView(
-                Self.plannerNote("Nothing to show — the server couldn't be asked."),
+                Self.quietNote("Nothing to show — the server couldn't be asked."),
                 in: .leading)
             if isPlannerMode { applyMode() }
             onResize?()
@@ -918,7 +1009,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         if buckets.isEmpty {
             plannerStatus = "Nothing planned"
             plannerSection.addView(
-                Self.plannerNote("Nothing in Today or Tomorrow."), in: .leading)
+                Self.quietNote("Nothing in Today or Tomorrow."), in: .leading)
         }
         for (name, label) in Self.plannerBuckets {
             guard let bucket = buckets.first(where: { $0.name == name }) else { continue }
@@ -938,7 +1029,7 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
             }
             if bucket.tasks.count > 6 {
                 rows.addView(
-                    Self.plannerNote("and \(bucket.tasks.count - 6) more"), in: .leading)
+                    Self.quietNote("and \(bucket.tasks.count - 6) more"), in: .leading)
             }
             plannerSection.addView(rows, in: .leading)
         }
@@ -963,11 +1054,187 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
         return row
     }
 
-    private static func plannerNote(_ text: String) -> NSTextField {
+    /// The small grey line a list uses to say something that isn't a row —
+    /// "and four more", why it is empty, what kind a notification is. Shared
+    /// by both reading tabs, which is why it is not named after either.
+    private static func quietNote(_ text: String) -> NSTextField {
         let note = NSTextField(labelWithString: text)
         note.font = .systemFont(ofSize: 11)
         note.textColor = .secondaryLabelColor
         return note
+    }
+
+    // MARK: - The inbox
+
+    /// What the footer says while the Notifications tab is up, kept here for
+    /// the same reason the planner's is: switching tabs and back must not
+    /// have to re-ask the server what to write.
+    private var inboxStatus = "Loading…"
+    private var inboxFailed = false
+
+    /// How many rows a popover can honestly show.
+    ///
+    /// The same bargain the critical list and the planner's buckets make. It
+    /// is a lower number here because a notification is two lines rather than
+    /// one, and because an inbox is the list most likely to have forty things
+    /// in it — the count in the footer is the honest total, and Mark all read
+    /// is right there for the case this limit exists to describe.
+    private static let inboxLimit = 8
+
+    /// The link path of each row on screen, by notification id. Rebuilt with
+    /// the list, because the rows themselves can only carry one string each
+    /// and the id is the one both buttons need.
+    private var shownNotifications: [String: String?] = [:]
+
+    /// `nil` means the ask failed and `reason` says why; an empty list is the
+    /// other answer entirely — you have read everything, which is a fact
+    /// about your week rather than about the network.
+    ///
+    /// `unread` is the server's own count rather than `items.count`: the tool
+    /// answers with the total on its first line, so a person with forty
+    /// unread sees eight rows and the true number under them.
+    func showNotifications(
+        _ items: [MCPClient.Notification]?, unread: Int = 0, reason: String? = nil
+    ) {
+        notificationsList.setViews([], in: .leading)
+        shownNotifications = [:]
+        guard let items = items else {
+            inboxFailed = true
+            // The likeliest failure is an installation older than the
+            // `notifications` tool, and the server's own refusal names it —
+            // which is more use than anything this app could guess.
+            inboxStatus = reason ?? "Couldn't read your notifications"
+            markAllButton.isHidden = true
+            notificationsList.addView(
+                Self.quietNote("Nothing to show — the server couldn't be asked."),
+                in: .leading)
+            if isNotificationsMode { applyMode() }
+            onResize?()
+            return
+        }
+        inboxFailed = false
+        inboxStatus = unread == 1 ? "1 unread" : "\(unread) unread"
+        if items.isEmpty {
+            inboxStatus = "Nothing unread"
+            markAllButton.isHidden = true
+            // Named for what it is rather than "Nothing to show": an empty
+            // inbox is the good outcome, and this is the one list in the app
+            // whose emptiness is worth sounding pleased about.
+            notificationsList.addView(
+                Self.quietNote("You have read everything."), in: .leading)
+            if isNotificationsMode { applyMode() }
+            onResize?()
+            return
+        }
+        for item in items.prefix(Self.inboxLimit) {
+            let row = notificationRow(item)
+            notificationsList.addView(row, in: .leading)
+            // After it is in the list, not before: an anchor pinned to a view
+            // the row is not yet inside has no common ancestor to resolve
+            // against, and AppKit throws rather than ignoring it.
+            row.widthAnchor.constraint(equalTo: notificationsList.widthAnchor).isActive = true
+        }
+        if items.count > Self.inboxLimit {
+            notificationsList.addView(
+                Self.quietNote("and \(items.count - Self.inboxLimit) more"), in: .leading)
+        }
+        markAllButton.isHidden = false
+        if isNotificationsMode { applyMode() }
+        onResize?()
+    }
+
+    /// One notification: what it says, what kind it is and how old, and the
+    /// tick that puts it down.
+    ///
+    /// Two lines rather than one. A task row elsewhere in this box is a title
+    /// and nothing else because the tab it is on already says what the list
+    /// is — these are thirteen different kinds of thing in one list, and
+    /// "Ada closed it" and "Ada shared it with you" are the same sentence
+    /// until something says which.
+    private func notificationRow(_ item: MCPClient.Notification) -> NSView {
+        // Where this one goes, against its id — the row buttons carry ids,
+        // like every other row in this box, and a click needs the link too.
+        shownNotifications[item.id] = item.linkPath
+        // **Nothing to open is not a broken link.** A couple of kinds are
+        // about something that has no page — a finished export, a daily
+        // digest — and those rows are a label rather than a disabled button:
+        // a dimmed row reads as "less important", which is the one thing it
+        // does not mean.
+        let title: NSControl
+        if let link = item.linkPath, !link.isEmpty {
+            let button = NSButton(
+                title: item.title, target: self, action: #selector(openNotification(_:)))
+            button.bezelStyle = .inline
+            button.isBordered = false
+            button.alignment = .left
+            button.contentTintColor = .labelColor
+            button.identifier = NSUserInterfaceItemIdentifier(item.id)
+            button.lineBreakMode = .byTruncatingTail
+            title = button
+        } else {
+            let label = NSTextField(labelWithString: item.title)
+            label.lineBreakMode = .byTruncatingTail
+            title = label
+        }
+        title.font = .systemFont(ofSize: 12)
+        // The title, not a hint about clicking: these are sentences, this row
+        // truncates them, and the tooltip is where the rest of one lives.
+        title.toolTip = item.title
+        // The row takes the slack so the tick sits against the right edge —
+        // the same trick the timer's heading row uses, and the reason there
+        // is no spacer view in either.
+        title.setContentHuggingPriority(NSLayoutConstraint.Priority(1), for: .horizontal)
+        // **And it is allowed to be squeezed.** A notification's title is a
+        // sentence the server wrote — "Ada Lovelace needs you on “Ring the
+        // foundry”" — not a task's few words, and a row that insisted on its
+        // full width would make the popover as wide as the longest thing in
+        // somebody's inbox. `fittingSize` is what the popover is sized from,
+        // so the limit has to be a constraint rather than a preference.
+        //
+        // A *ceiling*, not the 320pt floor: this box has always grown to fit
+        // a long project name or a critical task's title, and clamping these
+        // rows to the narrowest the popover ever gets would cut every one of
+        // them off before the part that says which task it is about. 420 is
+        // about ten more words and still a popover rather than a window; past
+        // it the title truncates and the tooltip has the rest.
+        //
+        // Compression resistance is left alone on purpose. Lowering it — the
+        // obvious way to let a long row shrink — makes `fittingSize` settle
+        // on the *narrowest* width that satisfies everything, which is the
+        // 320pt floor, and every row then truncates whether it needed to or
+        // not. The required ceiling below does the shrinking instead, and
+        // ordinary resistance is what asks for the width up to it.
+        title.widthAnchor.constraint(lessThanOrEqualToConstant: 420 - 24 - 6 - 22).isActive = true
+
+        // A tick, because this marks read rather than deletes: nothing is
+        // thrown away, and the notification is still in the web app's inbox
+        // afterwards. A bin here would promise something this button
+        // deliberately doesn't do.
+        let close = NSButton(
+            image: NSImage(systemSymbolName: "checkmark", accessibilityDescription: "Mark read")
+                ?? NSImage(), target: self, action: #selector(closeNotification(_:)))
+        close.bezelStyle = .inline
+        close.isBordered = false
+        close.contentTintColor = .secondaryLabelColor
+        close.identifier = NSUserInterfaceItemIdentifier(item.id)
+        close.toolTip = "Mark read"
+        close.setContentHuggingPriority(.required, for: .horizontal)
+
+        let top = NSStackView(views: [title, close])
+        top.orientation = .horizontal
+        top.spacing = 6
+
+        var caption = MCPClient.label(forKind: item.kind)
+        if let at = item.createdAt { caption += " · " + MCPClient.age(since: at) }
+        let row = NSStackView(views: [top, Self.quietNote(caption)])
+        row.orientation = .vertical
+        row.spacing = 1
+        row.alignment = .leading
+        // The heading row has to be as wide as the whole row, or the tick
+        // ends up beside the title rather than at the edge of the popover.
+        // The row's own width is pinned by the caller, once it is in the list.
+        top.widthAnchor.constraint(equalTo: row.widthAnchor).isActive = true
+        return row
     }
 
     // MARK: - The running timer
@@ -1024,6 +1291,57 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// buckets — carries its id in `identifier` and opens the same way.
     @objc private func openTaskRow(_ sender: NSButton) {
         if let id = sender.identifier?.rawValue { onOpen?(.task(id)) }
+    }
+
+    /// A notification's own row. It opens where the server said, and marks
+    /// itself read on the way — the same thing the web app's inbox does when
+    /// you click one, and for the same reason: a notification you have acted
+    /// on is not one you still need telling about.
+    @objc private func openNotification(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue,
+              let path = shownNotifications[id] ?? nil
+        else { return }
+        // Read first, then away: the popover closes on an open, and a call
+        // made after it has gone is one whose failure has nowhere to be
+        // reported. Both are fire-and-forget from here either way — the
+        // caller reloads the badge from the server rather than from this.
+        onCloseNotification?(id)
+        onOpen?(.link(path))
+    }
+
+    @objc private func closeNotification(_ sender: NSButton) {
+        guard let id = sender.identifier?.rawValue else { return }
+        // Disabled rather than removed: the row goes when the reload says it
+        // has gone, not when it was clicked. A list that tidied itself up
+        // optimistically would quietly disagree with the badge the moment a
+        // call failed — and the badge is the reason anybody opened this tab.
+        sender.isEnabled = false
+        onCloseNotification?(id)
+    }
+
+    @objc private func closeAllNotifications() {
+        markAllButton.isEnabled = false
+        onCloseAllNotifications?()
+    }
+
+    /// Put the button back, whatever the call did — the same rule the
+    /// timer's Stop follows. Failing and staying disabled would leave the
+    /// one control that empties the list dead until the box is reopened.
+    func markAllFinished() {
+        markAllButton.isEnabled = true
+    }
+
+    /// Why a tick didn't work, in the line the tab already owns.
+    ///
+    /// Not `report`: that writes the status line directly, and the next
+    /// reload of this list — which a failed tick asks for, because the row it
+    /// was clicked on is now of unknown state — would paint the count back
+    /// over it a moment later. This is kept as the tab's own status, so it
+    /// survives exactly as long as the list it is about.
+    func reportInbox(_ message: String) {
+        inboxStatus = message
+        inboxFailed = true
+        if isNotificationsMode { applyMode() }
     }
 
     @objc private func openTimed() {

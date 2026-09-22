@@ -82,6 +82,52 @@ ok("…and the sentence about unplanned work is not a task",
 ok("an empty board parses as nothing planned",
    MCPClient.plannerBoard(from: "Nothing on your planner.", buckets: wanted).isEmpty)
 
+// The inbox, which the Notifications tab both lists and acts on — so a
+// reworded row costs more here than an empty tab: the id it ticks and the
+// link it opens are both read out of this line. Keyed fields are read by
+// name rather than by position for the case below, where a task title with a
+// pipe in it shifts every column after the second.
+let board2 = """
+3 unread:
+[01a0957c-0101-7830-9e1a-def7c01c9fc5] | Ada asked you to look at the shackle | kind=task_action_required | at=2026-09-22T09:12:03.481920+00:00 | link=/orgs/01a05299-3ab4-7824-8a92-18b727f1dc9e/tasks/01a015bf-9f66-7826-80de-bcfd97907119
+[01a05299-3ab4-7824-8a92-18b727f1dc9e] | Order the housing | bracket | thing | kind=task_closed | at=2026-09-21T09:12:03+00:00 | link=/orgs/o/tasks/t
+[01a015bf-9f66-7826-80de-bcfd97907119] | Your export is ready | kind=export_ready | at=2026-09-20T09:12:03+00:00
+"""
+let inbox = try! MCPClient.inbox(from: board2)
+ok("the unread count leads the inbox", inbox.unread == 3, "\(inbox.unread)")
+ok("…and every row comes back", inbox.items.count == 3, "\(inbox.items.count)")
+ok("…with the title where a row's title goes",
+   inbox.items.first?.title == "Ada asked you to look at the shackle",
+   inbox.items.first?.title ?? "none")
+ok("…and a link to open", inbox.items.first?.linkPath?.hasPrefix("/orgs/") == true)
+ok("…and a time that parses", inbox.items.first?.createdAt != nil)
+// The one that would break a positional parse: a pipe in the title.
+ok("a pipe in a title doesn't move the link",
+   inbox.items[1].linkPath == "/orgs/o/tasks/t", inbox.items[1].linkPath ?? "none")
+ok("…nor the kind", inbox.items[1].kind == "task_closed", inbox.items[1].kind)
+// Some notifications are about nothing openable, and the row says so by
+// having no link rather than by carrying a broken one.
+ok("a notification with nowhere to go has no link", inbox.items[2].linkPath == nil)
+let empty = try! MCPClient.inbox(from: "0 unread.")
+ok("an empty inbox is a count and no rows", empty.unread == 0 && empty.items.isEmpty)
+ok("…and a read one is not listed as unread",
+   (try! MCPClient.inbox(from: "0 unread:\n[id-1] | Read already | kind=task_closed | read"))
+     .items.isEmpty)
+// The kinds are a closed set on the server and deliberately not here: a
+// newer installation will raise one this app has never heard of, and a row
+// that refuses to say what it is would be worse than a spelled-out slug.
+ok("a known kind reads as words",
+   MCPClient.label(forKind: "task_action_required") == "Asked to act")
+ok("…and an unknown one still says something",
+   MCPClient.label(forKind: "someday_kind") == "Someday kind",
+   MCPClient.label(forKind: "someday_kind"))
+ok("an age is the fewest characters that are true",
+   MCPClient.age(since: Date().addingTimeInterval(-7200)) == "2h",
+   MCPClient.age(since: Date().addingTimeInterval(-7200)))
+ok("…and a notification link doesn't double the slash",
+   MCPClient.linkURL(base: "https://ayeayecaptain.io/", path: "/orgs/o/tasks/t")?
+     .absoluteString == "https://ayeayecaptain.io/orgs/o/tasks/t")
+
 let environment = ProcessInfo.processInfo.environment
 guard let org = environment["AYEAYE_ORG"], environment["AYEAYE_SERVER"] != nil,
       environment["AYEAYE_TOKEN"] != nil
@@ -152,6 +198,25 @@ Task {
         // already know about" is one of the three cases it exists to
         // suppress. `scripts/e2e-mcp.sh`'s "notification inbox" block has two
         // accounts and pins the moving part there.
+
+        // The inbox's write half, which is what the tab's tick calls. Only
+        // the refusals can be checked against one account — this harness's
+        // own inbox stays empty, because `should_notify_action_required`
+        // never notifies you about yourself — so the moving part is pinned
+        // on the server, in `scripts/e2e-mcp.sh`'s "closing a notification"
+        // block, which has two accounts to prove it with.
+        let inboxNow = try await client.notifications()
+        ok("the inbox's count agrees with the badge's", inboxNow.unread == before)
+        ok("…and lists no more than it says it has", inboxNow.items.count <= inboxNow.unread)
+        do {
+            try await client.markNotificationRead(id: "not-a-uuid")
+            ok("a notification that isn't yours is refused", false, "it succeeded")
+        } catch {
+            let message = error.localizedDescription
+            ok("a notification that isn't yours is refused",
+               message.lowercased().contains("not in your inbox"), message)
+            ok("…without the SDK's wrapper", !message.hasPrefix("Error executing tool"), message)
+        }
 
         // The other thing the box files. One field, no organisation — and
         // no MCP tool that reads sparks back, deliberately, so this checks
