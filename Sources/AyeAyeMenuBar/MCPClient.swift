@@ -514,8 +514,21 @@ struct MCPClient {
             // the tab doesn't — and it would be a row that vanishes when the
             // list next reloads, which is worse than not showing it.
             guard !fields.contains("read") else { return nil }
+            // **An older server answers `[id] | kind | title`**, with the
+            // thing's name in the third field and no keyed ones at all. An
+            // app on a laptop outlives the version of the server it was built
+            // against, and against one of those the new parse would put
+            // `task_action_required` where every row's title goes — which
+            // reads as a bug in this app rather than as an installation that
+            // has not been updated. No link and no age there either: the tab
+            // lists and says what it can, and the tick is refused by name.
+            guard let kind = value("kind") else {
+                guard fields.count > 2 else { return nil }
+                return Notification(
+                    id: id, title: fields[2], kind: fields[1], linkPath: nil, createdAt: nil)
+            }
             return Notification(
-                id: id, title: fields[1], kind: value("kind") ?? "",
+                id: id, title: fields[1], kind: kind,
                 linkPath: value("link"), createdAt: value("at").flatMap(date(from:)))
         }
         return (unread, items)

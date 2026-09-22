@@ -113,6 +113,17 @@ ok("an empty inbox is a count and no rows", empty.unread == 0 && empty.items.isE
 ok("…and a read one is not listed as unread",
    (try! MCPClient.inbox(from: "0 unread:\n[id-1] | Read already | kind=task_closed | read"))
      .items.isEmpty)
+// An installation older than the row above answers `[id] | kind | title`,
+// and this app has to outlive its server's version: the title has to come
+// from the right field there too, or every row reads as a slug.
+let oldShape = try! MCPClient.inbox(
+    from: "1 unread:\n[01a0957c-0101-7830-9e1a-def7c01c9fc5] | task_action_required | Ada needs you on the shackle")
+ok("an older server's rows still read", oldShape.items.first?.title == "Ada needs you on the shackle",
+   oldShape.items.first?.title ?? "none")
+ok("…with their kind, and nothing invented",
+   oldShape.items.first?.kind == "task_action_required"
+     && oldShape.items.first?.linkPath == nil && oldShape.items.first?.createdAt == nil)
+
 // The kinds are a closed set on the server and deliberately not here: a
 // newer installation will raise one this app has never heard of, and a row
 // that refuses to say what it is would be worse than a spelled-out slug.
