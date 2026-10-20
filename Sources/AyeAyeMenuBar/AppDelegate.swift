@@ -22,6 +22,8 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
     private var timing: MCPClient.RunningTimer?
     private var timingTimer: Timer?
     private let realtime = RealtimeClient()
+    /// "Still working on this?" — see CheckIn.swift.
+    private let checkIn = CheckIn()
 
     func applicationDidFinishLaunching(_ notification: Notification) {
         // Before any window or field exists: without it, ⌘V is dead app-wide.
@@ -80,6 +82,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         quickAdd.onStopTimer = { [weak self] in self?.stopTiming() }
 
         registerHotKey()
+        startCheckIns()
         startWatchingCritical()
         startWatchingUnread()
         startWatchingTimer()
@@ -843,6 +846,9 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
         }
         do {
             timing = try await MCPClient.fromSettings().runningTimer()
+            // Only from an answer: "couldn't ask" must not cancel a question
+            // already on screen, any more than it clears the pip.
+            checkIn.track(timing)
         } catch {
             // Left as it was, the same rule the other two polls follow: "we
             // couldn't ask" is not "nothing is running", and only one of
@@ -875,6 +881,7 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
             do {
                 try await MCPClient.fromSettings().stopTimer()
                 timing = nil
+                checkIn.track(nil)
                 updateIcon()
                 quickAdd.showTiming(nil)
                 sizePopover()
@@ -882,6 +889,32 @@ final class AppDelegate: NSObject, NSApplicationDelegate {
                 quickAdd.report(error.localizedDescription, isError: true)
             }
             quickAdd.timerStopFinished()
+        }
+    }
+
+    // MARK: - Check-ins
+
+    /// The calls behind the panel's buttons. The question itself comes from
+    /// the server, through `refreshTiming` — see CheckIn.swift.
+    private func startCheckIns() {
+        checkIn.onAnswer = { [weak self] stillWorking in
+            do {
+                try await MCPClient.fromSettings().answerCheckIn(stillWorking: stillWorking)
+            } catch {
+                return error.localizedDescription
+            }
+            await self?.refreshTiming()
+            return nil
+        }
+        checkIn.onResume = { [weak self] paused in
+            do {
+                try await MCPClient.fromSettings().startTimer(
+                    taskID: paused.taskID, organisationID: paused.organisationID)
+            } catch {
+                return error.localizedDescription
+            }
+            await self?.refreshTiming()
+            return nil
         }
     }
 

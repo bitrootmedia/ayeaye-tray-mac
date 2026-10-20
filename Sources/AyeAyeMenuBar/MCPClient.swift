@@ -633,6 +633,10 @@ struct MCPClient {
         /// useless thing to keep, since it is wrong a minute later.
         let startedAt: Date?
         let elapsed: String
+        /// Set while the server's "still working on this?" waits for an
+        /// answer: when it runs out and the timer pauses itself. `nil` from
+        /// an installation that doesn't ask, which is the same as not asking.
+        var checkInDeadline: Date? = nil
     }
 
     /// `nil` for "nothing is running", which is an answer rather than a
@@ -660,7 +664,8 @@ struct MCPClient {
         return RunningTimer(
             taskID: id, title: fields[1], organisationID: org,
             startedAt: value("started").flatMap(Self.date(from:)),
-            elapsed: value("elapsed") ?? "")
+            elapsed: value("elapsed") ?? "",
+            checkInDeadline: value("check_in_deadline").flatMap(Self.date(from:)))
     }
 
     /// The server's `started=` is an ISO-8601 timestamp from Python's
@@ -705,6 +710,13 @@ struct MCPClient {
     /// is not an error there, and so isn't one here.
     func stopTimer() async throws {
         _ = try await call(tool: "stop_timer", arguments: [:])
+    }
+
+    /// Answer "still working on this?" — see `RunningTimer.checkInDeadline`.
+    /// The server asks; this app is one of the places it can be answered
+    /// from, with Telegram and the web header, and the first answer wins.
+    func answerCheckIn(stillWorking: Bool) async throws {
+        _ = try await call(tool: "answer_check_in", arguments: ["still_working": stillWorking])
     }
 
     /// Where a task lives in the web app. The SPA's own route, which is the

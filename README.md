@@ -56,6 +56,23 @@ It is whatever timer *you* have going, wherever it was started — the web app,
 this box, or your assistant — because there is one per person across the
 whole installation, so switching organisation doesn't hide it.
 
+**And now and then it asks whether you're still on it** — or rather, ayeaye
+does, and this is one of the places it asks. While a timer runs, the server
+asks every hour or two at random *Still working on this?*: in Telegram if
+you've linked it, in the web app's header, and here, as a small panel in the
+top-right corner with **Yes, still on it** and **Stop timer**. Answer in any
+of them and it's answered everywhere. Nobody answering within 15–30 minutes
+(also random) pauses the timer at the moment it asked — so the wait isn't
+counted as work — and the panel says so and offers **Resume**; the
+*Your timer was paused* notification goes wherever you route it.
+
+It's the server and not this app because a question only the menu bar app
+could ask would only reach people running the menu bar app, and the timer
+still going at midnight belongs to somebody who isn't. So the settings are on
+the web app's **Account** screen — Telegram and the apps, the apps only, or
+off, and at most how many a day (six by default) — and this app just reads
+`check_in_deadline=` off `running_timer` and answers with `answer_check_in`.
+
 ## Why it's its own repo
 
 ayeaye is a deployment unit: one compose file, one hostname, `docker compose up -d`.

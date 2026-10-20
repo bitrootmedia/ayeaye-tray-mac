@@ -1265,8 +1265,8 @@ final class QuickAddView: NSView, NSTextFieldDelegate, NSTextViewDelegate {
     /// `"25m"`, `"1h 30m"` — the same shape the server's own
     /// `format_duration` writes, so the two never disagree about how long
     /// something has been going.
-    static func elapsed(since start: Date) -> String {
-        let minutes = max(0, Int(Date().timeIntervalSince(start)) / 60)
+    static func elapsed(since start: Date, until end: Date = Date()) -> String {
+        let minutes = max(0, Int(end.timeIntervalSince(start)) / 60)
         let (hours, rest) = (minutes / 60, minutes % 60)
         if hours > 0 && rest > 0 { return "\(hours)h \(rest)m" }
         if hours > 0 { return "\(hours)h" }
