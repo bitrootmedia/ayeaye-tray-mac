@@ -8,14 +8,22 @@
 
 APP     = AyeAye.app
 BINARY  = .build/release/AyeAyeMenuBar
+FATBIN  = .build/apple/Products/Release/AyeAyeMenuBar
 DEST    = $(APP)/Contents/MacOS/AyeAyeMenuBar
+VERSION = $(shell /usr/libexec/PlistBuddy -c 'Print CFBundleShortVersionString' Resources/Info.plist)
+ZIP     = AyeAye-$(VERSION).zip
 
-.PHONY: all build app install run check check-create clean
+.PHONY: all build build-universal app dist install run check check-create clean
 
 all: app
 
 build:
 	swift build -c release
+
+# Both slices, for a build that leaves this machine. SwiftPM puts a lipo'd
+# binary somewhere else than a single-arch build, hence the second path.
+build-universal:
+	swift build -c release --arch arm64 --arch x86_64
 
 app: build
 	rm -rf $(APP)
@@ -39,6 +47,27 @@ install: app
 
 run: app
 	open $(APP)
+
+# A single file to hand somebody.
+#
+# Two differences from `app`. It is universal, because the machine it is going
+# to might be Intel and an arm64-only bundle does not merely run slowly there,
+# it refuses to launch. And it is zipped with `ditto`, not `zip`, because the
+# bundle's signature lives partly in extended attributes that `zip` drops —
+# unzip that and macOS reports a broken signature rather than an unsigned app.
+#
+# Still ad-hoc signed, so the receiving machine will quarantine it and refuse
+# the first launch. That is not something this end can fix without a Developer
+# ID and notarisation; see the README for what the other end does about it.
+dist: build-universal
+	rm -rf $(APP)
+	mkdir -p $(APP)/Contents/MacOS
+	cp Resources/Info.plist $(APP)/Contents/Info.plist
+	cp $(FATBIN) $(DEST)
+	codesign --force --sign - --identifier com.bitroot.ayeaye-menubar $(APP)
+	rm -f $(ZIP)
+	ditto -c -k --keepParent $(APP) $(ZIP)
+	@echo "Wrote $(ZIP) — $$(du -h $(ZIP) | cut -f1). Send that one file."
 
 # The one thing here worth a test: that ⌘V works.
 #
@@ -77,4 +106,4 @@ check-create:
 	@./.build/createcheck
 
 clean:
-	rm -rf .build $(APP)
+	rm -rf .build $(APP) AyeAye-*.zip

@@ -119,6 +119,31 @@ open ~/Applications/AyeAye.app
 
 To start it at login: System Settings › General › Login Items.
 
+## Sending it to somebody
+
+```sh
+make dist        # writes AyeAye-0.1.0.zip, about 300K
+```
+
+One file, and the machine it lands on needs nothing installed — no Xcode, no
+command line tools, no Swift runtime, which has shipped inside macOS since
+10.14. The binary is universal, so Intel and Apple Silicon both work, back to
+macOS 12.
+
+What it does need is one step past Gatekeeper, because the bundle is ad-hoc
+signed rather than notarised: anything arriving by download, Messages or AirDrop
+is quarantined, and a quarantined app without a Developer ID is refused on first
+launch. Unzip it, drag **AyeAye.app** to Applications, then either
+
+- open it, let it be refused, and go to **System Settings › Privacy & Security**,
+  where an **Open Anyway** button is now sitting near the bottom — this is the
+  only route on macOS 15, where right-click › Open no longer offers the override; or
+- in Terminal, `xattr -d -r com.apple.quarantine /Applications/AyeAye.app`, which
+  works on every version and is one line.
+
+Either is once, not once per launch. Removing that asterisk entirely is a
+Developer ID and `notarytool`, which is a paid account and a longer story.
+
 ## Set it up
 
 1. In ayeaye, open **Account** and make an access token under **Access tokens**,
@@ -408,4 +433,6 @@ contract no compiler checks.
   this was built against 12.3 (Xcode 13.4.1). AppKit's `NSStatusItem` does the
   same job on any SDK.
 - **Ad-hoc signed, not notarised.** Fine for your own machine. Handing the `.app`
-  to somebody else means a Developer ID and `notarytool`.
+  to somebody else works too — `make dist`, see [Sending it to
+  somebody](#sending-it-to-somebody) — but costs them one click past Gatekeeper.
+  Losing that click means a Developer ID and `notarytool`.
